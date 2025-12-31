@@ -1,0 +1,11 @@
+Change Log
+==========
+
+1. Server (server/index.js):
+   - Added '/generate-outreach' endpoint to generate email, SMS, and phone scripts using Gemini AI.
+   - Endpoint accepts { name, url, report } and returns JSON with scripts.
+
+2. Client (client/src/App.jsx):
+   - (Planned) Add 'Outreach' tab to the dashboard.
+   - (Planned) Add UI to display generated scripts for each lead.
+   - (Planned) Add 'Generate Outreach' button in the Results section.

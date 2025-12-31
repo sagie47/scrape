@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Excel CRO Screenshot Analyzer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <h1>Excel CRO Screenshot Analyzer</h1>
+        <p>
+          Upload an .xlsx with URLs, grab screenshots, and get per-page CRO
+          notes from Gemini.
+        </p>
+      </header>
+
+      <section class="panel">
+        <form id="upload-form">
+          <label class="field">
+            Excel file
+            <input type="file" name="excel" accept=".xlsx" required />
+          </label>
+
+          <label class="field">
+            Sheet name (optional)
+            <input type="text" name="sheet" placeholder="sheet1" />
+          </label>
+
+          <label class="field">
+            URL column (optional)
+            <input type="text" name="column" placeholder="Website" />
+          </label>
+
+          <button type="submit">Run Analysis</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div id="status">Idle</div>
+      </section>
+
+      <section id="results" class="results"></section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

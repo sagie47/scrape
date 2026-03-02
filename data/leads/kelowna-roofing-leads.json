@@ -1,0 +1,98 @@
+{
+  "query": "roofing",
+  "location": "Kelowna, British Columbia, Canada",
+  "source": "Serper Google Places API",
+  "retrieved_at": "2026-03-02",
+  "leads": [
+    {
+      "position": 1,
+      "name": "Premium Roofing Ltd.",
+      "address": "1502 Sutherland Ave #202, Kelowna, BC V1Y 5Y6",
+      "phone": "(250) 258-8600",
+      "website": "http://premiumroofingltd.com/",
+      "rating": 4.8,
+      "reviews": 101
+    },
+    {
+      "position": 2,
+      "name": "Best Quality Roofing",
+      "address": "220 Neave Rd #7, Kelowna, BC V1V 2L9",
+      "phone": "(250) 258-7755",
+      "website": "https://www.bcroofing.ca/",
+      "rating": 4.8,
+      "reviews": 50
+    },
+    {
+      "position": 3,
+      "name": "Credo roofing",
+      "address": "2382 Rhondda Crescent, Kelowna, BC V1Y 8A3",
+      "phone": "(236) 338-1753",
+      "website": "https://credo-roofing.com/",
+      "rating": 5.0,
+      "reviews": 13
+    },
+    {
+      "position": 4,
+      "name": "OK Roof Revival",
+      "address": "1123 St Paul St, Kelowna, BC V1Y 2C6",
+      "phone": "(778) 215-6577",
+      "website": "https://okroofrevival.com/",
+      "rating": 4.9,
+      "reviews": 35
+    },
+    {
+      "position": 5,
+      "name": "Roof Doctor",
+      "address": "715 Evans Ct, Kelowna, BC V1X 6G4",
+      "phone": "(250) 765-3013",
+      "website": "http://www.roofdoctor.ca/contact-us",
+      "rating": 4.7,
+      "reviews": 138
+    },
+    {
+      "position": 6,
+      "name": "Archer Roofing Inc",
+      "address": "313 Raven Dr, Kelowna, BC V1W 4T6",
+      "phone": "(250) 808-6297",
+      "website": "http://archerroofing.ca/roof-repair-kelowna/",
+      "rating": 5.0,
+      "reviews": 127
+    },
+    {
+      "position": 7,
+      "name": "Orchard Roofing",
+      "address": "1453 Collison Rd, Kelowna, BC V1X 1K9",
+      "phone": "(250) 681-1891",
+      "website": "http://orchardroofing.ca/?UTM_source=GBP_listing&UTM_medium=organic",
+      "rating": 4.8,
+      "reviews": 40
+    },
+    {
+      "position": 8,
+      "name": "PCC Roofing - Kelowna",
+      "address": "Harvey Ave Unit #214-200, Kelowna, BC V1Y 6G4",
+      "phone": "(604) 554-0962",
+      "website": "http://www.pccroofing.ca/",
+      "rating": 5.0,
+      "reviews": 2
+    },
+    {
+      "position": 9,
+      "name": "Osland Roofing",
+      "address": "220 Nickel Rd, Kelowna, BC V1X 0A5",
+      "phone": "(250) 870-6727",
+      "website": "https://www.oslandroofing.com/",
+      "rating": 5.0,
+      "reviews": 29
+    },
+    {
+      "position": 10,
+      "name": "JV Roofing LTD.",
+      "address": "275 Rutland Rd N, Kelowna, BC V1X 3B1",
+      "phone": "(250) 863-7172",
+      "website": "https://www.jv-roofing.ca/",
+      "rating": 4.6,
+      "reviews": 32
+    }
+  ]
+}

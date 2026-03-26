@@ -11,6 +11,11 @@ import outreachRoutes from "./outreach.routes.js";
 import campaignsRoutes from "./campaigns.routes.js";
 import sequencesRoutes from "./sequences.routes.js";
 import { router as artifactsRoutes, shareRouter } from "./artifacts.routes.js";
+import prospectingRoutes from "./prospecting.routes.js";
+import analysisRoutes from "./analysis.routes.js";
+import reportsRoutes from "./reports.routes.js";
+import settingsRoutes from "./settings.routes.js";
+import outboundRoutes from "./outbound.routes.js";
 
 /**
  * Register all routes on the Express app
@@ -37,6 +42,13 @@ export function registerRoutes(app) {
 
     // Artifacts endpoints (MVP1) - mounted at /artifacts prefix
     app.use('/artifacts', artifactsRoutes);
+
+    // Prospecting + analysis + reports + outbound + settings
+    app.use(prospectingRoutes);
+    app.use(analysisRoutes);
+    app.use(reportsRoutes);
+    app.use(settingsRoutes);
+    app.use(outboundRoutes);
 
     // Public share route (mounted at root for clean URLs like /share/token-abc)
     app.use('/', shareRouter);

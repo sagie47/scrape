@@ -104,7 +104,7 @@ router.post("/campaign-leads/:id/outcome", requireAuth, express.json(), asyncHan
     const { id } = req.params;
     const { outcome } = req.body;
 
-    if (!["replied", "booked", "not_interested", "none"].includes(outcome)) {
+    if (!["replied", "booked", "not_interested", "none", "no_response", "skipped"].includes(outcome)) {
         return res.status(400).json({ error: "Invalid outcome" });
     }
 
@@ -118,11 +118,17 @@ router.post("/campaign-leads/:id/outcome", requireAuth, express.json(), asyncHan
 router.get("/campaigns/:id/export.csv", requireAuth, asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const { id } = req.params;
+    const format = req.query.format === "xlsx" ? "xlsx" : "csv";
 
-    const csv = await campaigns.exportCampaignToCsv(id, userId);
+    const csv = await campaigns.exportCampaignToCsv(id, userId, format);
 
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", `attachment; filename=campaign_${id}.csv`);
+    if (format === "xlsx") {
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        res.setHeader("Content-Disposition", `attachment; filename=campaign_${id}.xlsx`);
+    } else {
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", `attachment; filename=campaign_${id}.csv`);
+    }
     res.send(csv);
 }));
 

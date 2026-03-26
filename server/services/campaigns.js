@@ -1,15 +1,20 @@
 /**
  * Campaigns Service - State machine and business logic
- * 
- * Single source of truth for campaign state transitions.
  */
 
 import { supabaseAdmin } from "../lib/supabase.js";
 import * as rendering from "./rendering.js";
+import * as exportsService from "./exports.js";
 
-/**
- * Create a new campaign in draft state
- */
+const OUTCOME_MAP = {
+    replied: "replied",
+    booked: "booked",
+    not_interested: "not_interested",
+    none: "none",
+    no_response: "none",
+    skipped: "not_interested"
+};
+
 export async function createCampaign(userId, { name, sequenceId, leadIds = [] }) {
     const { data: campaign, error } = await supabaseAdmin
         .from("campaigns")
@@ -24,23 +29,19 @@ export async function createCampaign(userId, { name, sequenceId, leadIds = [] })
 
     if (error) throw error;
 
-    // Enroll leads if provided
     if (leadIds.length > 0) {
-        const enrollments = leadIds.map(leadId => ({
+        const enrollments = leadIds.map((leadId) => ({
             campaign_id: campaign.id,
             lead_id: leadId,
             state: "queued"
         }));
 
-        await supabaseAdmin.from("campaign_leads").insert(enrollments);
+        await supabaseAdmin.from("campaign_leads").upsert(enrollments, { onConflict: "campaign_id,lead_id" });
     }
 
     return campaign;
 }
 
-/**
- * Get campaigns for a user
- */
 export async function getCampaigns(userId) {
     const { data, error } = await supabaseAdmin
         .from("campaigns")
@@ -54,20 +55,17 @@ export async function getCampaigns(userId) {
 
     if (error) throw error;
 
-    return data.map(c => ({
-        id: c.id,
-        name: c.name,
-        status: c.status,
-        sequenceName: c.sequences?.name || null,
-        leadsCount: c.campaign_leads?.[0]?.count || 0,
-        createdAt: c.created_at,
-        startAt: c.start_at
+    return (data || []).map((row) => ({
+        id: row.id,
+        name: row.name,
+        status: row.status,
+        sequenceName: row.sequences?.name || null,
+        leadsCount: row.campaign_leads?.[0]?.count || 0,
+        createdAt: row.created_at,
+        startAt: row.start_at || row.started_at || null
     }));
 }
 
-/**
- * Get campaign details with stats
- */
 export async function getCampaign(campaignId, userId) {
     const { data, error } = await supabaseAdmin
         .from("campaigns")
@@ -83,17 +81,16 @@ export async function getCampaign(campaignId, userId) {
     if (error) throw error;
     if (!data) return null;
 
-    // Calculate stats
     const leads = data.campaign_leads || [];
     const stats = {
         total: leads.length,
-        queued: leads.filter(l => l.state === "queued").length,
-        inProgress: leads.filter(l => l.state === "in_progress").length,
-        waiting: leads.filter(l => l.state === "waiting").length,
-        stopped: leads.filter(l => l.state === "stopped").length,
-        completed: leads.filter(l => l.state === "completed").length,
-        replied: leads.filter(l => l.outcome === "replied").length,
-        booked: leads.filter(l => l.outcome === "booked").length
+        queued: leads.filter((lead) => lead.state === "queued").length,
+        inProgress: leads.filter((lead) => lead.state === "in_progress").length,
+        waiting: leads.filter((lead) => lead.state === "waiting").length,
+        stopped: leads.filter((lead) => lead.state === "stopped").length,
+        completed: leads.filter((lead) => lead.state === "completed").length,
+        replied: leads.filter((lead) => lead.outcome === "replied").length,
+        booked: leads.filter((lead) => lead.outcome === "booked").length
     };
 
     return {
@@ -102,42 +99,34 @@ export async function getCampaign(campaignId, userId) {
         status: data.status,
         sequence: data.sequences,
         stats,
-        leads: leads.map(l => ({
-            id: l.id,
-            leadId: l.lead_id,
-            state: l.state,
-            currentStep: l.current_step_order,
-            nextDue: l.next_due_at,
-            outcome: l.outcome
+        leads: leads.map((lead) => ({
+            id: lead.id,
+            leadId: lead.lead_id,
+            state: lead.state,
+            currentStep: lead.current_step_order,
+            nextDue: lead.next_due_at,
+            outcome: lead.outcome
         })),
         createdAt: data.created_at,
-        startAt: data.start_at
+        startAt: data.start_at || data.started_at || null
     };
 }
 
-/**
- * Activate campaign - generate all tasks for enrolled leads
- */
 export async function activateCampaign(campaignId, userId) {
-    // Verify ownership and get sequence
-    const { data: campaign, error: campError } = await supabaseAdmin
+    const { data: campaign, error: campaignError } = await supabaseAdmin
         .from("campaigns")
         .select(`*, sequences(*, sequence_steps(*))`)
         .eq("id", campaignId)
         .eq("user_id", userId)
         .single();
 
-    if (campError || !campaign) throw new Error("Campaign not found");
+    if (campaignError || !campaign) throw new Error("Campaign not found");
     if (!campaign.sequence_id) throw new Error("No sequence assigned to campaign");
     if (campaign.status === "active") throw new Error("Campaign already active");
 
-    const steps = campaign.sequences?.sequence_steps || [];
-    if (steps.length === 0) throw new Error("Sequence has no steps");
+    const steps = (campaign.sequences?.sequence_steps || []).sort((a, b) => a.step_order - b.step_order);
+    if (!steps.length) throw new Error("Sequence has no steps");
 
-    // Sort steps by order
-    steps.sort((a, b) => a.step_order - b.step_order);
-
-    // Get enrolled leads with their data
     const { data: campaignLeads } = await supabaseAdmin
         .from("campaign_leads")
         .select(`*, leads(*)`)
@@ -147,32 +136,27 @@ export async function activateCampaign(campaignId, userId) {
 
     const startAt = new Date();
     const tasksToInsert = [];
-    const leadsToUpdate = [];
 
-    for (const cl of campaignLeads) {
-        // Generate tasks for all steps
-        let cumDays = 0;
+    for (const campaignLead of campaignLeads) {
+        let cumulativeDelay = 0;
         for (const step of steps) {
-            cumDays += step.delay_days;
+            cumulativeDelay += step.delay_days;
             const dueAt = new Date(startAt);
-            dueAt.setDate(dueAt.getDate() + cumDays);
-            dueAt.setHours(9, 0, 0, 0); // Schedule at 9am
+            dueAt.setDate(dueAt.getDate() + cumulativeDelay);
+            dueAt.setHours(9, 0, 0, 0);
 
-            // Deterministic A/B variant based on hash
-            const variant = hashVariant(cl.id, step.step_order);
+            const variant = hashVariant(campaignLead.id, step.step_order);
             const template = variant === "A" ? step.template_a : (step.template_b || step.template_a);
             const subject = variant === "A" ? step.subject_a : (step.subject_b || step.subject_a);
-
-            // Render template
             const rendered = rendering.renderStep({
                 step,
-                lead: cl.leads,
+                lead: campaignLead.leads,
                 template,
                 subject
             });
 
             tasksToInsert.push({
-                campaign_lead_id: cl.id,
+                campaign_lead_id: campaignLead.id,
                 step_id: step.id,
                 channel: step.channel,
                 due_at: dueAt.toISOString(),
@@ -183,51 +167,30 @@ export async function activateCampaign(campaignId, userId) {
             });
         }
 
-        // Update campaign lead state
-        leadsToUpdate.push({
-            id: cl.id,
-            state: "in_progress",
-            current_step_order: 1,
-            next_due_at: tasksToInsert.find(t => t.campaign_lead_id === cl.id)?.due_at
-        });
-    }
-
-    // Insert all tasks
-    if (tasksToInsert.length > 0) {
-        const { error: taskError } = await supabaseAdmin
-            .from("touch_tasks")
-            .insert(tasksToInsert);
-        if (taskError) throw taskError;
-    }
-
-    // Update campaign lead states
-    for (const update of leadsToUpdate) {
         await supabaseAdmin
             .from("campaign_leads")
             .update({
-                state: update.state,
-                current_step_order: update.current_step_order,
-                next_due_at: update.next_due_at,
+                state: "in_progress",
+                current_step_order: 1,
+                next_due_at: tasksToInsert.find((task) => task.campaign_lead_id === campaignLead.id)?.due_at || null,
                 updated_at: new Date().toISOString()
             })
-            .eq("id", update.id);
+            .eq("id", campaignLead.id);
     }
 
-    // Activate campaign
+    if (tasksToInsert.length) {
+        const { error: taskError } = await supabaseAdmin.from("touch_tasks").insert(tasksToInsert);
+        if (taskError) throw taskError;
+    }
+
     await supabaseAdmin
         .from("campaigns")
-        .update({
-            status: "active",
-            start_at: startAt.toISOString()
-        })
+        .update({ status: "active", start_at: startAt.toISOString() })
         .eq("id", campaignId);
 
     return { success: true, tasksGenerated: tasksToInsert.length };
 }
 
-/**
- * Pause campaign
- */
 export async function pauseCampaign(campaignId, userId) {
     const { error } = await supabaseAdmin
         .from("campaigns")
@@ -239,11 +202,7 @@ export async function pauseCampaign(campaignId, userId) {
     return { success: true };
 }
 
-/**
- * Get tasks for a campaign by bucket
- */
 export async function getTasks(campaignId, userId, bucket = "today") {
-    // Verify ownership
     const { data: campaign } = await supabaseAdmin
         .from("campaigns")
         .select("id")
@@ -263,7 +222,7 @@ export async function getTasks(campaignId, userId, bucket = "today") {
         .from("touch_tasks")
         .select(`
             *,
-            campaign_leads!inner(campaign_id, leads(*)),
+            campaign_leads!inner(id, campaign_id, lead_id, state, outcome, leads(*)),
             sequence_steps(*)
         `)
         .eq("campaign_leads.campaign_id", campaignId)
@@ -272,9 +231,7 @@ export async function getTasks(campaignId, userId, bucket = "today") {
     if (bucket === "overdue") {
         query = query.lt("due_at", todayStart.toISOString());
     } else if (bucket === "today") {
-        query = query
-            .gte("due_at", todayStart.toISOString())
-            .lt("due_at", todayEnd.toISOString());
+        query = query.gte("due_at", todayStart.toISOString()).lt("due_at", todayEnd.toISOString());
     } else if (bucket === "upcoming") {
         query = query.gte("due_at", todayEnd.toISOString());
     }
@@ -282,25 +239,22 @@ export async function getTasks(campaignId, userId, bucket = "today") {
     const { data, error } = await query.order("due_at");
     if (error) throw error;
 
-    return data.map(t => ({
-        id: t.id,
-        channel: t.channel,
-        dueAt: t.due_at,
-        status: t.status,
-        variant: t.variant,
-        subject: t.rendered_subject,
-        body: t.rendered_body,
-        missingFields: t.missing_fields,
-        lead: t.campaign_leads?.leads,
-        step: t.sequence_steps
+    return (data || []).map((task) => ({
+        id: task.id,
+        campaignLeadId: task.campaign_lead_id,
+        channel: task.channel,
+        dueAt: task.due_at,
+        status: task.status,
+        variant: task.variant,
+        subject: task.rendered_subject,
+        body: task.rendered_body,
+        missingFields: task.missing_fields || [],
+        lead: task.campaign_leads?.leads || null,
+        step: task.sequence_steps || null
     }));
 }
 
-/**
- * Mark task as done
- */
 export async function completeTask(taskId, userId) {
-    // Get task and verify ownership via campaign chain
     const { data: task } = await supabaseAdmin
         .from("touch_tasks")
         .select(`
@@ -317,63 +271,51 @@ export async function completeTask(taskId, userId) {
         throw new Error("Task not found");
     }
 
-    // Update task
     await supabaseAdmin
         .from("touch_tasks")
-        .update({
-            status: "done",
-            completed_at: new Date().toISOString()
-        })
+        .update({ status: "done", completed_at: new Date().toISOString() })
         .eq("id", taskId);
 
-    // Log activity
-    await supabaseAdmin
-        .from("activities")
-        .insert({
-            campaign_lead_id: task.campaign_lead_id,
-            type: "task_completed",
-            meta: { task_id: taskId, channel: task.channel }
-        });
+    await supabaseAdmin.from("activities").insert({
+        campaign_lead_id: task.campaign_lead_id,
+        type: "task_completed",
+        meta: { task_id: taskId, channel: task.channel }
+    });
 
     return { success: true };
 }
 
-/**
- * Set outcome for a campaign lead
- */
 export async function setOutcome(campaignLeadId, userId, outcome) {
-    // Verify ownership
-    const { data: cl } = await supabaseAdmin
+    const canonicalOutcome = OUTCOME_MAP[outcome] || outcome;
+
+    const { data: campaignLead } = await supabaseAdmin
         .from("campaign_leads")
-        .select(`*, campaigns!inner(user_id)`)
+        .select(`*, campaigns!inner(user_id, sequence_id)`) 
         .eq("id", campaignLeadId)
         .single();
 
-    if (!cl || cl.campaigns.user_id !== userId) {
+    if (!campaignLead || campaignLead.campaigns.user_id !== userId) {
         throw new Error("Campaign lead not found");
     }
 
-    // Check if this outcome triggers a stop rule
     const { data: campaign } = await supabaseAdmin
         .from("campaigns")
         .select(`sequences(stop_rules)`)
-        .eq("id", cl.campaign_id)
+        .eq("id", campaignLead.campaign_id)
         .single();
 
     const stopRules = campaign?.sequences?.stop_rules?.stop_on || [];
-    const shouldStop = stopRules.includes(outcome);
+    const shouldStop = stopRules.includes(canonicalOutcome);
 
-    // Update campaign lead
     await supabaseAdmin
         .from("campaign_leads")
         .update({
-            outcome,
-            state: shouldStop ? "stopped" : cl.state,
+            outcome: canonicalOutcome,
+            state: shouldStop ? "stopped" : campaignLead.state,
             updated_at: new Date().toISOString()
         })
         .eq("id", campaignLeadId);
 
-    // If stopped, skip all pending tasks
     if (shouldStop) {
         await supabaseAdmin
             .from("touch_tasks")
@@ -382,77 +324,24 @@ export async function setOutcome(campaignLeadId, userId, outcome) {
             .eq("status", "pending");
     }
 
-    // Log activity
-    await supabaseAdmin
-        .from("activities")
-        .insert({
-            campaign_lead_id: campaignLeadId,
-            type: "outcome_set",
-            meta: { outcome, stopped: shouldStop }
-        });
+    await supabaseAdmin.from("activities").insert({
+        campaign_lead_id: campaignLeadId,
+        type: "outcome_set",
+        meta: { outcome: canonicalOutcome, stopped: shouldStop }
+    });
 
     return { success: true, stopped: shouldStop };
 }
 
-/**
- * Export campaign to CSV
- */
-export async function exportCampaignToCsv(campaignId, userId) {
-    const campaign = await getCampaign(campaignId, userId);
-    if (!campaign) throw new Error("Campaign not found");
-
-    // Get all tasks with lead data
-    const { data: tasks } = await supabaseAdmin
-        .from("touch_tasks")
-        .select(`
-            *,
-            campaign_leads!inner(
-                *,
-                leads(*)
-            )
-        `)
-        .in("campaign_leads.id", campaign.leads.map(l => l.id))
-        .order("due_at");
-
-    const lines = [
-        ["Lead Name", "Email", "Phone", "Website", "Step", "Channel", "Status", "Due At", "Subject", "Body"].join(",")
-    ];
-
-    for (const t of tasks || []) {
-        const lead = t.campaign_leads?.leads;
-        lines.push([
-            escapeCsv(lead?.name || ""),
-            escapeCsv(lead?.email || ""),
-            escapeCsv(lead?.phone || ""),
-            escapeCsv(lead?.website || ""),
-            t.step_id || "",
-            t.channel,
-            t.status,
-            t.due_at,
-            escapeCsv(t.rendered_subject || ""),
-            escapeCsv(t.rendered_body || "")
-        ].join(","));
-    }
-
-    return lines.join("\n");
-}
-
-// Helpers
-
-function escapeCsv(str) {
-    if (!str) return "";
-    if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-        return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
+export async function exportCampaignToCsv(campaignId, userId, format = "csv") {
+    return exportsService.exportCampaignToCsv(campaignId, userId, format);
 }
 
 function hashVariant(campaignLeadId, stepOrder) {
-    // Deterministic A/B based on simple hash
     const combined = `${campaignLeadId}-${stepOrder}`;
     let hash = 0;
-    for (let i = 0; i < combined.length; i++) {
-        hash = ((hash << 5) - hash) + combined.charCodeAt(i);
+    for (let index = 0; index < combined.length; index += 1) {
+        hash = ((hash << 5) - hash) + combined.charCodeAt(index);
         hash |= 0;
     }
     return hash % 2 === 0 ? "A" : "B";

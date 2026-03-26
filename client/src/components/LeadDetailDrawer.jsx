@@ -72,7 +72,7 @@ export default function LeadDetailDrawer({
                     </div>
                     {auditUrl && (
                         <a className="drawer-link" href={auditUrl} target="_blank" rel="noreferrer">
-                            View Mini Audit <ExternalLink size={14} />
+                            View Report <ExternalLink size={14} />
                         </a>
                     )}
                 </div>
@@ -109,8 +109,7 @@ export default function LeadDetailDrawer({
                             <option value="replied">Replied</option>
                             <option value="booked">Booked</option>
                             <option value="not_interested">Not interested</option>
-                            <option value="no_response">No response</option>
-                            <option value="skipped">Skipped</option>
+                            <option value="none">No response yet</option>
                         </select>
                         <button className="hud-btn" type="button" onClick={onSkipRemaining}>
                             Skip Remaining

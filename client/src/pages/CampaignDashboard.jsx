@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { FileSpreadsheet, List } from 'lucide-react';
 import LeadDetailDrawer from '../components/LeadDetailDrawer';
 import StatsCard from '../components/StatsCard';
-import { api, API_BASE } from '../lib/api';
-import { supabase } from '../lib/supabaseClient';
+import { api } from '../lib/api';
 
 /**
  * @typedef {Object} Lead
@@ -130,23 +129,7 @@ export default function CampaignDashboard({ campaignId, onNavigate }) {
         if (!campaignId) return;
         setExporting(true);
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const response = await fetch(`${API_BASE}/campaigns/${campaignId}/export.csv`, {
-                headers: {
-                    ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {})
-                }
-            });
-            if (!response.ok) {
-                const message = await response.text();
-                throw new Error(message || 'Export failed');
-            }
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `campaign_${campaignId}.csv`;
-            link.click();
-            window.URL.revokeObjectURL(url);
+            await api.downloadCampaignExport(campaignId, 'csv');
         } catch (err) {
             console.error('Failed to export', err);
             alert('Export failed.');
@@ -212,8 +195,6 @@ export default function CampaignDashboard({ campaignId, onNavigate }) {
                                     <option value="replied">Replied</option>
                                     <option value="booked">Booked</option>
                                     <option value="not_interested">Not interested</option>
-                                    <option value="no_response">No response</option>
-                                    <option value="skipped">Skipped</option>
                                     <option value="none">No outcome</option>
                                 </select>
                             </div>

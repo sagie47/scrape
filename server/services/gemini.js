@@ -1,6 +1,6 @@
 /**
  * Gemini AI Service - Centralized AI operations
- * 
+ *
  * Handles screenshot analysis and outreach generation using Google's Gemini API.
  */
 
@@ -10,36 +10,49 @@ import { config } from "../config/env.js";
 
 const MODEL_NAME = config.geminiModel;
 
-/**
- * Analyze a screenshot for CRO issues using Gemini Vision
- * @param {string} imagePath - Path to the screenshot image
- * @param {string} url - URL that was captured
- * @returns {Promise<object>} Analysis report with summary, issues, quick_wins, confidence
- */
-export async function analyzeScreenshot(imagePath, url) {
+function getModel() {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-        return {
-            error: "Missing GEMINI_API_KEY. Set it in the environment."
-        };
+        throw new Error("Missing GEMINI_API_KEY");
     }
 
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+    return genAI.getGenerativeModel({ model: MODEL_NAME });
+}
 
+function parseJsonResponse(text) {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const jsonText = jsonMatch ? jsonMatch[0] : text;
+    return JSON.parse(jsonText);
+}
+
+function normalizeConfidence(value) {
+    if (typeof value === "number") {
+        return Math.max(0, Math.min(100, Math.round(value)));
+    }
+
+    const lower = String(value || "").toLowerCase();
+    if (lower === "high") return 85;
+    if (lower === "medium") return 65;
+    if (lower === "low") return 40;
+    return 60;
+}
+
+export async function analyzeScreenshot(imagePath, url, context = {}) {
+    const model = getModel();
     const imageData = await fs.readFile(imagePath, { encoding: "base64" });
+
     const prompt = [
         {
             text: [
-                "You are a conversion rate optimizer.",
-                "Analyze the screenshot for conversion blockers and design flaws.",
-                "Focus on hierarchy, CTA clarity, trust signals, load clutter,",
-                "form friction, messaging alignment, and visual noise.",
-                "Return JSON with fields:",
-                "summary (string), issues (array of strings),",
-                "action_items (array of strings: specific, actionable fixes),",
-                "confidence (low|medium|high).",
-                `Context URL: ${url}`
+                "You are a senior conversion-rate optimizer and local-business growth operator.",
+                "Analyze this homepage screenshot and return a structured CRO intelligence object.",
+                "Focus on message clarity, trust, CTA strength, friction, visual hierarchy, offer clarity, and obvious technical credibility issues.",
+                "Use the supplied context when available.",
+                `Context URL: ${url}`,
+                `Context notes: ${JSON.stringify(context)}`,
+                "Return JSON only with these fields:",
+                "summary (string), issues (array of strings), quick_wins (array of strings), trust_signals (array of strings), conversion_gaps (array of strings), offer_angles (array of strings), confidence (0-100 integer)."
             ].join(" ")
         },
         {
@@ -53,61 +66,101 @@ export async function analyzeScreenshot(imagePath, url) {
     const result = await model.generateContent(prompt);
     const text = result.response.text();
 
-    // Use regex to find the first JSON-like block if multiple blocks or extra text exist
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    const jsonText = jsonMatch ? jsonMatch[0] : text;
-
     try {
-        const parsed = JSON.parse(jsonText);
-        // Normalize field names if Gemini uses camelCase or variations
+        const parsed = parseJsonResponse(text);
         return {
-            summary: parsed.summary || parsed.Summary || "",
-            issues: parsed.issues || parsed.Issues || [],
-            quick_wins: parsed.quick_wins || parsed.quickWins || parsed["quick-wins"] || parsed.QuickWins || [],
-            confidence: parsed.confidence || parsed.Confidence || "medium"
+            summary: parsed.summary || "",
+            issues: parsed.issues || [],
+            quick_wins: parsed.quick_wins || parsed.quickWins || [],
+            trust_signals: parsed.trust_signals || parsed.trustSignals || [],
+            conversion_gaps: parsed.conversion_gaps || parsed.conversionGaps || [],
+            offer_angles: parsed.offer_angles || parsed.offerAngles || [],
+            confidence: normalizeConfidence(parsed.confidence)
         };
     } catch (err) {
         console.error("Failed to parse Gemini JSON:", err, "Raw text:", text);
-        return { raw: text };
+        return {
+            summary: "AI analysis could not be parsed cleanly.",
+            issues: [],
+            quick_wins: [],
+            trust_signals: [],
+            conversion_gaps: [],
+            offer_angles: [],
+            confidence: 50,
+            raw: text
+        };
     }
 }
 
-/**
- * Generate outreach scripts (email, SMS, phone) for a prospect
- * @param {object} context - { name, url, report }
- * @returns {Promise<object>} Scripts with email, sms, phone fields
- */
-export async function generateOutreach({ name, url, report }) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-        throw new Error("Missing GEMINI_API_KEY");
-    }
-
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+export async function generateOutreachAtoms({ lead, report, brand = {} }) {
+    const model = getModel();
 
     const prompt = `
-    You are an expert sales copywriter.
-    Context: We analyzed ${name ? name : "a potential client"} (${url}).
-    Findings: ${JSON.stringify(report || "No specific report, just general optimization needed.")}
-    
-    Task: Create 3 outreach scripts to pitch our "Conversion Optimization Services".
-    1. Cold Email (Short, personalized, value-first).
-    2. SMS (One sentence hook).
-    3. Cold Call Script (Opening + value prop).
+You create reusable outreach atoms for an agency-grade local business audit pipeline.
+Business: ${lead?.name || "Unknown business"}
+Website: ${lead?.website || "Unknown website"}
+Category: ${lead?.category || "Unknown category"}
+Location: ${[lead?.city, lead?.region, lead?.country].filter(Boolean).join(", ") || "Unknown"}
+Brand: ${JSON.stringify(brand)}
+Audit report: ${JSON.stringify(report)}
 
-    Return JSON ONLY:
-    {
-      "email": { "subject": "...", "body": "..." },
-      "sms": "...",
-      "phone": "..."
-    }
-  `;
+Return JSON only with these keys:
+{
+  "subject_lines": ["..."],
+  "openers": ["..."],
+  "problem_bullets": ["..."],
+  "quick_win_bullets": ["..."],
+  "proof_points": ["..."],
+  "cta_options": ["..."],
+  "call_openers": ["..."],
+  "objection_handles": ["..."],
+  "dm_one_liners": ["..."]
+}
+`.trim();
 
     const result = await model.generateContent(prompt);
     const text = result.response.text();
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    const jsonText = jsonMatch ? jsonMatch[0] : text;
+    const parsed = parseJsonResponse(text);
 
-    return JSON.parse(jsonText);
+    return {
+        subject_lines: parsed.subject_lines || [],
+        openers: parsed.openers || [],
+        problem_bullets: parsed.problem_bullets || [],
+        quick_win_bullets: parsed.quick_win_bullets || [],
+        proof_points: parsed.proof_points || [],
+        cta_options: parsed.cta_options || [],
+        call_openers: parsed.call_openers || [],
+        objection_handles: parsed.objection_handles || [],
+        dm_one_liners: parsed.dm_one_liners || []
+    };
+}
+
+export async function generateOutreach({ lead, report, brand = {}, reportLinks = {} }) {
+    const model = getModel();
+
+    const prompt = `
+You are an expert cold outreach copywriter writing for an agency that performs conversion audits for local businesses.
+Lead: ${JSON.stringify(lead)}
+Brand: ${JSON.stringify(brand)}
+Report links: ${JSON.stringify(reportLinks)}
+Audit findings: ${JSON.stringify(report)}
+
+Return JSON only:
+{
+  "email": { "subject": "...", "body": "..." },
+  "sms": "...",
+  "phone": "..."
+}
+
+Rules:
+- Be specific and low-pressure.
+- Reference 1-2 concrete findings.
+- Mention the report link naturally if provided.
+- Keep the email under 180 words.
+- Do not use hype language.
+`.trim();
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    return parseJsonResponse(text);
 }

@@ -1,7 +1,5 @@
 /**
  * Job Processor Service - Unified job execution
- * 
- * Consolidates runJob, runLeadsJob, runSingleJob into a single processor.
  */
 
 import fs from "fs/promises";
@@ -14,30 +12,35 @@ import { config } from "../config/env.js";
 import * as db from "./db.js";
 import * as storage from "./storage.js";
 import * as audit from "./audit.js";
-import { analyzeScreenshot } from "./gemini.js";
+import { analyzeScreenshot, generateOutreachAtoms } from "./gemini.js";
 import { captureAuditScreenshot } from "../lib/capture.js";
 import { normalizeUrl } from "../lib/url.js";
+import { createMapsScrapeJob, normalizeGosomResults, waitForMapsScrapeJob } from "./gosom.js";
 
-// Concurrency for parallel page processing
 const CONCURRENCY_LIMIT = Math.max(1, Number.isFinite(config.captureConcurrency) ? config.captureConcurrency : 4);
 const limit = pLimit(CONCURRENCY_LIMIT);
 
-// Browser Pool Singleton
 let browserInstance = null;
+const stoppedJobs = new Set();
 
-/**
- * Get or create shared browser instance
- */
 export async function getBrowser() {
     if (!browserInstance) {
-        console.log("Launching shared browser instance...");
         browserInstance = await chromium.launch({ headless: true });
     }
     return browserInstance;
 }
 
-// Track stopped jobs (shared mutable state)
-const stoppedJobs = new Set();
+export function stopJob(jobId) {
+    stoppedJobs.add(jobId);
+}
+
+export function isJobStopped(jobId) {
+    return stoppedJobs.has(jobId);
+}
+
+function clearStoppedJob(jobId) {
+    stoppedJobs.delete(jobId);
+}
 
 function sanitizeCaptureMode(value) {
     return value === "fast" ? "fast" : "standard";
@@ -57,7 +60,7 @@ function buildCaptureOptions(captureMode, thumbnailPath) {
     };
 }
 
-function dedupeUrls(entries) {
+function dedupeEntries(entries) {
     const seen = new Set();
     const normalized = [];
 
@@ -72,34 +75,35 @@ function dedupeUrls(entries) {
     return normalized;
 }
 
-/**
- * Request a job to stop
- */
-export function stopJob(jobId) {
-    stoppedJobs.add(jobId);
+function mergeReports(aiReport, auditResult, lead = {}) {
+    const seoIssues = auditResult?.seo?.issues || [];
+    const mergedIssues = [...new Set([...(aiReport?.issues || []), ...seoIssues])];
+
+    return {
+        summary: aiReport?.summary || "No summary available.",
+        issues: mergedIssues,
+        quick_wins: aiReport?.quick_wins || [],
+        trust_signals: aiReport?.trust_signals || [],
+        conversion_gaps: aiReport?.conversion_gaps || [],
+        offer_angles: aiReport?.offer_angles || [],
+        confidence: aiReport?.confidence || 60,
+        seo: auditResult?.seo || null,
+        psi: auditResult?.psi || null,
+        crux: auditResult?.crux || null,
+        business: {
+            name: lead.name || null,
+            website: lead.website || null,
+            category: lead.category || null,
+            city: lead.city || null,
+            region: lead.region || null
+        }
+    };
 }
 
-/**
- * Check if a job has been stopped
- */
-export function isJobStopped(jobId) {
-    return stoppedJobs.has(jobId);
-}
-
-/**
- * Clear stopped status after job completes
- */
-export function clearStoppedJob(jobId) {
-    stoppedJobs.delete(jobId);
-}
-
-/**
- * Process a single URL - common logic for all job types
- */
-async function processUrl({ browser, jobId, jobDir, entry, userId, includeSeo = false, captureMode = "standard" }) {
+async function processUrl({ browser, jobId, jobDir, entry, userId, includeSeo = true, captureMode = "standard" }) {
     if (isJobStopped(jobId)) return null;
 
-    const { rowIndex, url, name } = entry;
+    const { rowIndex, url, name, leadId, lead } = entry;
     if (!url) return { rowIndex, url, skipped: true };
 
     const screenshotName = `row_${rowIndex}.png`;
@@ -108,7 +112,6 @@ async function processUrl({ browser, jobId, jobDir, entry, userId, includeSeo = 
     const thumbnailLocalPath = path.join(jobDir, "screenshots", thumbnailName);
 
     let report = null;
-    let seoAudit = null;
     let error = null;
     let screenshotKey = null;
     let thumbnailKey = null;
@@ -117,63 +120,46 @@ async function processUrl({ browser, jobId, jobDir, entry, userId, includeSeo = 
     const captureOptions = buildCaptureOptions(captureMode, thumbnailLocalPath);
 
     try {
-        console.log(`[processUrl] Starting: ${url} (row ${rowIndex})`);
-        // Optionally run SEO audit in parallel with screenshot capture
         const seoPromise = includeSeo ? audit.runQuickAudit(url) : Promise.resolve(null);
 
         page = await browser.newPage({
             viewport: { width: 1440, height: 900 },
             ignoreHTTPSErrors: true
         });
-        console.log(`[processUrl] Page created for ${url}`);
         page.setDefaultNavigationTimeout(captureOptions.navigationTimeout);
 
-        // Use unified capture pipeline
         const captureResult = await captureAuditScreenshot(page, url, screenshotLocalPath, captureOptions);
-        console.log(`[processUrl] Screenshot captured for ${url}`);
         if (captureResult?.usedThumbnail) {
             thumbnailPath = `/outputs/${jobId}/screenshots/${thumbnailName}`;
         }
 
-        // Upload to Supabase Storage
         screenshotKey = await storage.uploadScreenshot(screenshotLocalPath, userId, jobId, `row_${rowIndex}`);
-        console.log(`[processUrl] Storage upload done for ${url}`);
-
         if (captureResult?.usedThumbnail) {
             try {
                 thumbnailKey = await storage.uploadThumbnail(thumbnailLocalPath, userId, jobId, `row_${rowIndex}`);
-            } catch (err) {
-                console.warn("Thumbnail upload failed:", err?.message || err);
+            } catch (thumbErr) {
+                console.warn("Thumbnail upload failed:", thumbErr?.message || thumbErr);
             }
         }
 
-        // Analyze the screenshot with Gemini
-        const [aiReport, seoResult] = await Promise.all([
-            analyzeScreenshot(screenshotLocalPath, url),
-            seoPromise
-        ]);
-        console.log(`[processUrl] Gemini analysis done for ${url}`);
+        const seoResult = await seoPromise;
+        const aiReport = await analyzeScreenshot(screenshotLocalPath, url, {
+            name,
+            category: lead?.category,
+            city: lead?.city,
+            region: lead?.region,
+            seoIssues: seoResult?.seo?.issues || []
+        });
 
-        // Combine AI vision report with SEO audit if available
-        if (seoResult) {
-            report = {
-                ...aiReport,
-                seo: seoResult?.seo || null,
-                seoIssues: seoResult?.seo?.issues || [],
-            };
-            seoAudit = seoResult;
-        } else {
-            report = aiReport;
-        }
+        report = mergeReports(aiReport, seoResult, lead || { name, website: url });
     } catch (err) {
-        console.error(`[processUrl] Error for ${url}:`, err?.message || err);
         error = String(err?.message || err);
     } finally {
         if (page) await page.close().catch(() => { });
     }
 
-    // Insert result into DB with storage key
-    await db.insertResult(jobId, {
+    const jobResult = await db.insertResult(jobId, {
+        leadId: leadId || null,
         rowIndex,
         url,
         name,
@@ -182,38 +168,59 @@ async function processUrl({ browser, jobId, jobDir, entry, userId, includeSeo = 
         thumbnailKey,
         thumbnailPath: thumbnailKey ? null : thumbnailPath,
         report,
-        error
+        error,
+        analysisVersion: "v2",
+        analysisKind: "cro"
     });
-    console.log(`[processUrl] DB insert done for ${url}`);
 
-    return { rowIndex, name, url, screenshotKey, report, error };
+    if (!error && leadId && report) {
+        await db.updateLeadAnalysis(leadId, userId, report).catch((err) => {
+            console.warn("Failed to update lead analysis:", err?.message || err);
+        });
+
+        try {
+            const atoms = await generateOutreachAtoms({ lead, report });
+            await db.saveOutreachAtoms(leadId, jobResult.id, atoms);
+        } catch (atomsErr) {
+            console.warn("Failed to generate outreach atoms:", atomsErr?.message || atomsErr);
+        }
+    }
+
+    return {
+        rowIndex,
+        leadId,
+        name,
+        url,
+        screenshotKey,
+        thumbnailKey,
+        report,
+        error
+    };
 }
 
-/**
- * Finalize a job after all URLs are processed
- */
 async function finalizeJob(jobId, results) {
-    const processedCount = results.filter(r => r !== null && !r.skipped).length;
-    const errors = results.filter(r => r?.error).map(r =>
-        r.name ? `${r.name}: ${r.error}` : `Row ${r.rowIndex}: ${r.error}`
-    );
+    const processedCount = results.filter((row) => row !== null && !row.skipped).length;
+    const errors = results.filter((row) => row?.error).map((row) => row.error);
 
     if (isJobStopped(jobId)) {
-        await db.updateJob(jobId, { status: "stopped", processed: processedCount });
-        clearStoppedJob(jobId);
-    } else {
         await db.updateJob(jobId, {
-            status: "done",
+            status: "stopped",
             processed: processedCount,
-            errors: errors.length > 0 ? errors : null,
-            completed_at: new Date().toISOString()
+            completed_at: new Date().toISOString(),
+            errors: errors.length ? errors : null
         });
+        clearStoppedJob(jobId);
+        return;
     }
+
+    await db.updateJob(jobId, {
+        status: "done",
+        processed: processedCount,
+        completed_at: new Date().toISOString(),
+        errors: errors.length ? errors : null
+    });
 }
 
-/**
- * Detect which column contains URLs in an Excel sheet
- */
 function detectUrlColumn(rows, headers) {
     const headerScore = (name) => {
         const lower = name.toLowerCase();
@@ -225,7 +232,7 @@ function detectUrlColumn(rows, headers) {
     };
 
     const scored = headers
-        .map((h) => ({ name: h, score: headerScore(h) }))
+        .map((header) => ({ name: header, score: headerScore(header) }))
         .sort((a, b) => b.score - a.score);
 
     if (scored.length && scored[0].score > 0) {
@@ -233,8 +240,8 @@ function detectUrlColumn(rows, headers) {
     }
 
     for (const header of headers) {
-        const values = rows.map((r) => String(r[header] || ""));
-        const urlCount = values.filter((v) => normalizeUrl(v)).length;
+        const values = rows.map((row) => String(row[header] || ""));
+        const urlCount = values.filter((value) => normalizeUrl(value)).length;
         if (urlCount >= Math.max(3, Math.floor(values.length * 0.2))) {
             return header;
         }
@@ -243,14 +250,13 @@ function detectUrlColumn(rows, headers) {
     return "";
 }
 
-/**
- * Run a batch job from Excel file
- */
+async function ensureJobDirectories(jobDir) {
+    await fs.mkdir(path.join(jobDir, "screenshots"), { recursive: true });
+}
+
 export async function runBatchJob({ jobId, jobDir, inputPath, sheetName, columnName, scrapeLimit, userId, captureMode = "standard" }) {
     const workbook = xlsx.readFile(inputPath);
-    const sheetToUse = sheetName
-        ? workbook.Sheets[sheetName]
-        : workbook.Sheets[workbook.SheetNames[0]];
+    const sheetToUse = sheetName ? workbook.Sheets[sheetName] : workbook.Sheets[workbook.SheetNames[0]];
 
     if (!sheetToUse) {
         await db.failJob(jobId, "Sheet not found.");
@@ -259,10 +265,7 @@ export async function runBatchJob({ jobId, jobDir, inputPath, sheetName, columnN
 
     const rows = xlsx.utils.sheet_to_json(sheetToUse, { defval: "" });
     const headers = rows.length ? Object.keys(rows[0]) : [];
-    const urlColumn =
-        columnName && headers.includes(columnName)
-            ? columnName
-            : detectUrlColumn(rows, headers);
+    const urlColumn = columnName && headers.includes(columnName) ? columnName : detectUrlColumn(rows, headers);
 
     if (!urlColumn) {
         await db.failJob(jobId, "Could not detect a URL column. Provide the column name.");
@@ -271,74 +274,129 @@ export async function runBatchJob({ jobId, jobDir, inputPath, sheetName, columnN
 
     let urls = rows.map((row, index) => ({
         rowIndex: index + 2,
-        url: String(row[urlColumn] || "").trim()
+        url: String(row[urlColumn] || "").trim(),
+        name: row.name || row.company || row.business || null,
+        lead: { name: row.name || row.company || row.business || null }
     }));
 
     if (scrapeLimit && scrapeLimit > 0) {
         urls = urls.slice(0, scrapeLimit);
     }
 
-    const normalizedUrls = dedupeUrls(urls);
-    await db.updateJob(jobId, { total_urls: normalizedUrls.length });
+    const normalizedUrls = dedupeEntries(urls);
+    await db.updateJob(jobId, { total_urls: normalizedUrls.length, status: "running", started_at: new Date().toISOString() });
+    await ensureJobDirectories(jobDir);
 
     const browser = await getBrowser();
     const results = await Promise.all(
-        normalizedUrls.map(entry => limit(() => processUrl({ browser, jobId, jobDir, entry, userId, includeSeo: true, captureMode })))
+        normalizedUrls.map((entry) => limit(() => processUrl({ browser, jobId, jobDir, entry, userId, includeSeo: true, captureMode })))
     );
 
     await finalizeJob(jobId, results);
 }
 
-/**
- * Run a leads analysis job
- */
+export async function runLeadAnalysisJob({ jobId, jobDir, leads, userId, captureMode = "standard" }) {
+    const entries = dedupeEntries(
+        leads.map((lead, index) => ({
+            rowIndex: index + 1,
+            leadId: lead.id,
+            name: lead.name,
+            url: lead.website,
+            lead
+        }))
+    );
+
+    await db.updateJob(jobId, { total_urls: entries.length, status: "running", started_at: new Date().toISOString() });
+    await ensureJobDirectories(jobDir);
+
+    const browser = await getBrowser();
+    const results = await Promise.all(
+        entries.map((entry) => limit(() => processUrl({ browser, jobId, jobDir, entry, userId, includeSeo: true, captureMode })))
+    );
+
+    await finalizeJob(jobId, results);
+}
+
 export async function runLeadsJob({ jobId, jobDir, urls, userId, captureMode = "standard" }) {
-    console.log(`[runLeadsJob] Starting job ${jobId} with ${urls.length} URLs`);
+    const entries = dedupeEntries(urls);
+    await db.updateJob(jobId, { total_urls: entries.length, status: "running", started_at: new Date().toISOString() });
+    await ensureJobDirectories(jobDir);
+
     const browser = await getBrowser();
-    console.log(`[runLeadsJob] Browser ready, deduping URLs...`);
-    const normalizedUrls = dedupeUrls(urls);
-    console.log(`[runLeadsJob] Processing ${normalizedUrls.length} unique URLs`);
-    await db.updateJob(jobId, { total_urls: normalizedUrls.length });
     const results = await Promise.all(
-        normalizedUrls.map(entry => limit(() => processUrl({ browser, jobId, jobDir, entry, userId, includeSeo: false, captureMode })))
+        entries.map((entry) => limit(() => processUrl({ browser, jobId, jobDir, entry, userId, includeSeo: true, captureMode })))
     );
-    console.log(`[runLeadsJob] All URLs processed, finalizing job...`);
+
     await finalizeJob(jobId, results);
-    console.log(`[runLeadsJob] Job ${jobId} complete`);
 }
 
-/**
- * Run a single URL analysis job
- */
 export async function runSingleJob({ jobId, jobDir, url, userId, captureMode = "standard" }) {
-    const browser = await getBrowser();
     const normalizedUrl = normalizeUrl(url);
     if (!normalizedUrl) {
-        await db.updateJob(jobId, {
-            status: "error",
-            processed: 0,
-            errors: ["Invalid URL."],
-            completed_at: new Date().toISOString()
-        });
+        await db.failJob(jobId, "Invalid URL.");
         return;
     }
 
-    const entry = { rowIndex: 1, url: normalizedUrl };
+    await db.updateJob(jobId, { total_urls: 1, status: "running", started_at: new Date().toISOString() });
+    await ensureJobDirectories(jobDir);
 
-    const result = await processUrl({ browser, jobId, jobDir, entry, userId, includeSeo: false, captureMode });
+    const browser = await getBrowser();
+    const result = await processUrl({
+        browser,
+        jobId,
+        jobDir,
+        entry: { rowIndex: 1, url: normalizedUrl, name: normalizedUrl, lead: { name: normalizedUrl, website: normalizedUrl } },
+        userId,
+        includeSeo: true,
+        captureMode
+    });
 
     if (result?.error) {
+        await db.failJob(jobId, result.error);
+        return;
+    }
+
+    await finalizeJob(jobId, [result]);
+}
+
+export async function runMapsImportJob({ jobId, keyword, location, limit = 25, userId, lang, email, depth = 1, radius, zoom, lat, lon, fastMode = false }) {
+    await db.updateJob(jobId, {
+        status: "running",
+        started_at: new Date().toISOString(),
+        total_urls: limit
+    });
+    await db.logEvent(jobId, "info", `Submitting maps import for ${keyword}${location ? ` in ${location}` : ""}`);
+
+    try {
+        const created = await createMapsScrapeJob({ keyword, location, limit, lang, email, depth, radius, zoom, lat, lon, fastMode });
+        const externalJobId = created.id || created.job_id;
         await db.updateJob(jobId, {
-            status: "error",
-            processed: 1,
-            errors: [result.error],
-            completed_at: new Date().toISOString()
+            metadata: {
+                keyword,
+                location,
+                externalJobId,
+                source: "gosom"
+            }
         });
-    } else {
-        await db.updateJob(jobId, {
-            status: "done",
-            processed: 1,
-            completed_at: new Date().toISOString()
+
+        const completed = await waitForMapsScrapeJob(externalJobId);
+        const normalized = normalizeGosomResults(completed, keyword).slice(0, limit);
+        const saved = await db.saveLeads(userId, normalized, {
+            jobId,
+            keyword,
+            location,
+            source: "gosom"
         });
+
+        await db.completeJob(jobId, saved.length, { total_urls: saved.length });
+        await db.logEvent(jobId, "info", `Imported ${saved.length} leads from gosom`, {
+            externalJobId,
+            imported: saved.length
+        });
+        return saved;
+    } catch (err) {
+        await db.failJob(jobId, String(err?.message || err));
+        await db.logEvent(jobId, "error", String(err?.message || err));
+        throw err;
     }
 }

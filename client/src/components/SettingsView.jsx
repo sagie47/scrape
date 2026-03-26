@@ -1,285 +1,199 @@
-/**
- * SettingsView - User preferences and configuration
- * 
- * Settings for capture mode, export defaults, and account management.
- * Uses Obsidian Glass design system for consistency.
- */
+import { useEffect, useState } from 'react';
+import { Check, Globe, KeyRound, Save, Send, Settings, User } from 'lucide-react';
+import { api } from '../lib/api';
+import ObsidianDropdown from '../ObsidianDropdown';
 
-import { useState, useEffect } from 'react'
-import {
-    Settings,
-    Zap,
-    FileSpreadsheet,
-    User,
-    Key,
-    Save,
-    Check,
-    Camera,
-    Clock,
-    Download
-} from 'lucide-react'
-import ObsidianDropdown from '../ObsidianDropdown'
+const STORAGE_KEY = 'scraper_settings';
+const defaultRuntime = {
+  captureMode: 'standard',
+  defaultExportFormat: 'xlsx',
+  includeTimestamps: true,
+  concurrencyLimit: 4
+};
 
-const STORAGE_KEY = 'scraper_settings'
+const defaultBranding = {
+  brandName: 'Scrape Intelligence',
+  senderName: '',
+  senderTitle: 'Founder',
+  logoUrl: '',
+  primaryColor: '#0ea5e9',
+  supportEmail: ''
+};
 
-const defaultSettings = {
-    captureMode: 'standard',
-    defaultExportFormat: 'xlsx',
-    includeTimestamps: true,
-    concurrencyLimit: 4
-}
+export default function SettingsView({ user }) {
+  const [runtime, setRuntime] = useState(defaultRuntime);
+  const [branding, setBranding] = useState(defaultBranding);
+  const [destinations, setDestinations] = useState([]);
+  const [destinationDraft, setDestinationDraft] = useState({ name: '', kind: 'webhook', targetUrl: '' });
+  const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-function SettingsView({ user, captureMode, onCaptureModeChange }) {
-    const [settings, setSettings] = useState(defaultSettings)
-    const [saved, setSaved] = useState(false)
-
-    // Load settings from localStorage
-    useEffect(() => {
-        try {
-            const stored = localStorage.getItem(STORAGE_KEY)
-            if (stored) {
-                const parsed = JSON.parse(stored)
-                setSettings({ ...defaultSettings, ...parsed })
-            }
-        } catch (err) {
-            console.error('Failed to load settings:', err)
-        }
-    }, [])
-
-    // Sync captureMode from parent
-    useEffect(() => {
-        if (captureMode && captureMode !== settings.captureMode) {
-            setSettings(s => ({ ...s, captureMode }))
-        }
-    }, [captureMode])
-
-    const updateSetting = (key, value) => {
-        setSettings(prev => {
-            const updated = { ...prev, [key]: value }
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(updated))
-
-            // Sync capture mode to parent if changed
-            if (key === 'captureMode' && onCaptureModeChange) {
-                onCaptureModeChange(value)
-            }
-
-            return updated
-        })
-
-        // Show saved indicator
-        setSaved(true)
-        setTimeout(() => setSaved(false), 2000)
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        setRuntime({ ...defaultRuntime, ...JSON.parse(stored) });
+      }
+    } catch (error) {
+      console.error('Failed to load runtime settings', error);
     }
+  }, []);
 
-    return (
-        <div className="dashboard-grid animate-fade-in">
-            {/* Header */}
-            <div className="full-width" style={{ marginBottom: '1rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                    <Settings size={28} strokeWidth={1.5} style={{ color: 'var(--lux-tertiary)' }} />
-                    <div>
-                        <h2 style={{ fontSize: '1.5rem', fontWeight: 400, marginBottom: '0.25rem' }}>Settings</h2>
-                        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Configure your scanning preferences</p>
-                    </div>
-                    {saved && (
-                        <div className="badge active" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <Check size={12} /> Saved
-                        </div>
-                    )}
-                </div>
-            </div>
+  useEffect(() => {
+    let ignore = false;
+    const load = async () => {
+      setLoading(true);
+      try {
+        const [brandingData, destinationsData] = await Promise.all([
+          api.getBranding(),
+          api.getOutboundDestinations()
+        ]);
+        if (!ignore) {
+          setBranding({ ...defaultBranding, ...(brandingData || {}) });
+          setDestinations(destinationsData || []);
+        }
+      } catch (error) {
+        console.error('Failed to load settings', error);
+      } finally {
+        if (!ignore) setLoading(false);
+      }
+    };
+    load();
+    return () => { ignore = true; };
+  }, []);
 
-            {/* Capture Settings */}
-            <div className="widget" style={{ gridColumn: 'span 6' }}>
-                <div className="widget-header">
-                    <div className="widget-title">
-                        <Camera size={16} /> CAPTURE_SETTINGS
-                    </div>
-                </div>
+  const showSaved = () => {
+    setSaved(true);
+    window.setTimeout(() => setSaved(false), 1800);
+  };
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                    <div>
-                        <label className="stat-label" style={{ display: 'block', marginBottom: '0.5rem' }}>
-                            DEFAULT CAPTURE MODE
-                        </label>
-                        <ObsidianDropdown
-                            value={settings.captureMode}
-                            onChange={(val) => updateSetting('captureMode', val)}
-                            options={[
-                                { label: 'FULL CAPTURE', value: 'standard', subtext: 'Full page scroll + analysis' },
-                                { label: 'FAST SCAN', value: 'fast', subtext: 'Viewport only for speed' }
-                            ]}
-                        />
-                        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
-                            Full capture scrolls pages to reveal lazy-loaded content. Fast scan captures viewport only.
-                        </p>
-                    </div>
+  const updateRuntime = (key, value) => {
+    const next = { ...runtime, [key]: value };
+    setRuntime(next);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    showSaved();
+  };
 
-                    <div>
-                        <label className="stat-label" style={{ display: 'block', marginBottom: '0.5rem' }}>
-                            CONCURRENCY LIMIT
-                        </label>
-                        <ObsidianDropdown
-                            value={settings.concurrencyLimit}
-                            onChange={(val) => updateSetting('concurrencyLimit', Number(val))}
-                            options={[
-                                { label: '2 PARALLEL', value: 2, subtext: 'Conservative' },
-                                { label: '4 PARALLEL', value: 4, subtext: 'Balanced' },
-                                { label: '8 PARALLEL', value: 8, subtext: 'Aggressive' }
-                            ]}
-                        />
-                        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
-                            Number of pages to process simultaneously. Higher values are faster but use more resources.
-                        </p>
-                    </div>
-                </div>
-            </div>
+  const saveBranding = async () => {
+    const next = await api.updateBranding(branding);
+    setBranding({ ...defaultBranding, ...(next || {}) });
+    showSaved();
+  };
 
-            {/* Export Settings */}
-            <div className="widget" style={{ gridColumn: 'span 6' }}>
-                <div className="widget-header">
-                    <div className="widget-title">
-                        <Download size={16} /> EXPORT_DEFAULTS
-                    </div>
-                </div>
+  const saveDestination = async () => {
+    if (!destinationDraft.name || !destinationDraft.targetUrl) return;
+    const savedDestination = await api.saveOutboundDestination(destinationDraft);
+    setDestinations((prev) => [savedDestination, ...prev.filter((item) => item.id !== savedDestination.id)]);
+    setDestinationDraft({ name: '', kind: 'webhook', targetUrl: '' });
+    showSaved();
+  };
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                    <div>
-                        <label className="stat-label" style={{ display: 'block', marginBottom: '0.5rem' }}>
-                            DEFAULT FORMAT
-                        </label>
-                        <ObsidianDropdown
-                            value={settings.defaultExportFormat}
-                            onChange={(val) => updateSetting('defaultExportFormat', val)}
-                            options={[
-                                { label: 'XLSX', value: 'xlsx', subtext: 'Excel workbook' },
-                                { label: 'CSV', value: 'csv', subtext: 'Comma-separated' }
-                            ]}
-                        />
-                    </div>
-
-                    <div>
-                        <label style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.75rem',
-                            cursor: 'pointer',
-                            padding: '1rem',
-                            background: 'rgba(255,255,255,0.02)',
-                            borderRadius: 'var(--radius-md)',
-                            border: '1px solid var(--glass-border)'
-                        }}>
-                            <input
-                                type="checkbox"
-                                checked={settings.includeTimestamps}
-                                onChange={(e) => updateSetting('includeTimestamps', e.target.checked)}
-                                style={{
-                                    width: '18px',
-                                    height: '18px',
-                                    accentColor: 'var(--accent-cyan)'
-                                }}
-                            />
-                            <div>
-                                <div style={{ fontWeight: 500 }}>Include Timestamps</div>
-                                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                                    Add date/time columns to exports
-                                </div>
-                            </div>
-                        </label>
-                    </div>
-                </div>
-            </div>
-
-            {/* Account Info */}
-            <div className="widget" style={{ gridColumn: 'span 6' }}>
-                <div className="widget-header">
-                    <div className="widget-title">
-                        <User size={16} /> ACCOUNT
-                    </div>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    <div className="list-item" style={{ marginBottom: 0 }}>
-                        <div style={{
-                            width: '40px',
-                            height: '40px',
-                            borderRadius: '50%',
-                            background: 'linear-gradient(135deg, var(--accent-cyan) 0%, #9333ea 100%)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: '1.2rem',
-                            fontWeight: 600
-                        }}>
-                            {user?.email?.[0]?.toUpperCase() || 'U'}
-                        </div>
-                        <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 600 }}>{user?.email || 'Not signed in'}</div>
-                            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                                {user?.user_metadata?.full_name || 'User'}
-                            </div>
-                        </div>
-                        <span className="badge active">ACTIVE</span>
-                    </div>
-                </div>
-            </div>
-
-            {/* API Keys Status */}
-            <div className="widget" style={{ gridColumn: 'span 6' }}>
-                <div className="widget-header">
-                    <div className="widget-title">
-                        <Key size={16} /> API_SERVICES
-                    </div>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    <div className="list-item" style={{ marginBottom: 0 }}>
-                        <div style={{
-                            width: '8px',
-                            height: '8px',
-                            borderRadius: '50%',
-                            background: 'var(--accent-success)',
-                            boxShadow: '0 0 8px var(--accent-success)'
-                        }} />
-                        <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 500, fontSize: '0.9rem' }}>Gemini AI</div>
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Screenshot analysis</div>
-                        </div>
-                        <span className="badge active">Connected</span>
-                    </div>
-
-                    <div className="list-item" style={{ marginBottom: 0 }}>
-                        <div style={{
-                            width: '8px',
-                            height: '8px',
-                            borderRadius: '50%',
-                            background: 'var(--accent-success)',
-                            boxShadow: '0 0 8px var(--accent-success)'
-                        }} />
-                        <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 500, fontSize: '0.9rem' }}>Serper</div>
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Lead scraping</div>
-                        </div>
-                        <span className="badge active">Connected</span>
-                    </div>
-
-                    <div className="list-item" style={{ marginBottom: 0 }}>
-                        <div style={{
-                            width: '8px',
-                            height: '8px',
-                            borderRadius: '50%',
-                            background: 'var(--lux-tertiary)'
-                        }} />
-                        <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 500, fontSize: '0.9rem' }}>PageSpeed Insights</div>
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Performance metrics</div>
-                        </div>
-                        <span className="badge neutral">Not configured</span>
-                    </div>
-                </div>
-            </div>
+  return (
+    <div className="dashboard-grid animate-fade-in">
+      <div className="full-width" style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+        <Settings size={28} strokeWidth={1.5} style={{ color: 'var(--lux-tertiary)' }} />
+        <div>
+          <h2 style={{ fontSize: '1.5rem', fontWeight: 400, marginBottom: '0.25rem' }}>Settings</h2>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Branding, outbound destinations, and local runtime preferences.</p>
         </div>
-    )
-}
+        {saved && <div className="badge active" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Check size={12} /> Saved</div>}
+      </div>
 
-export default SettingsView
+      <div className="widget" style={{ gridColumn: 'span 6' }}>
+        <div className="widget-header"><div className="widget-title"><User size={16} /> BRANDING</div></div>
+        {loading ? <div className="campaigns-loading">Loading branding…</div> : (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <label className="sequence-field"><span className="stat-label">Brand Name</span><input className="hud-input" value={branding.brandName} onChange={(e) => setBranding((prev) => ({ ...prev, brandName: e.target.value }))} /></label>
+            <label className="sequence-field"><span className="stat-label">Support Email</span><input className="hud-input" value={branding.supportEmail} onChange={(e) => setBranding((prev) => ({ ...prev, supportEmail: e.target.value }))} /></label>
+            <label className="sequence-field"><span className="stat-label">Sender Name</span><input className="hud-input" value={branding.senderName} onChange={(e) => setBranding((prev) => ({ ...prev, senderName: e.target.value }))} /></label>
+            <label className="sequence-field"><span className="stat-label">Sender Title</span><input className="hud-input" value={branding.senderTitle} onChange={(e) => setBranding((prev) => ({ ...prev, senderTitle: e.target.value }))} /></label>
+            <label className="sequence-field"><span className="stat-label">Logo URL</span><input className="hud-input" value={branding.logoUrl} onChange={(e) => setBranding((prev) => ({ ...prev, logoUrl: e.target.value }))} /></label>
+            <label className="sequence-field"><span className="stat-label">Primary Color</span><input className="hud-input" value={branding.primaryColor} onChange={(e) => setBranding((prev) => ({ ...prev, primaryColor: e.target.value }))} /></label>
+            <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="hud-btn primary" type="button" onClick={saveBranding}><Save size={14} /> Save Branding</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="widget" style={{ gridColumn: 'span 6' }}>
+        <div className="widget-header"><div className="widget-title"><Send size={16} /> OUTBOUND DESTINATIONS</div></div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr 1.4fr auto', gap: '0.75rem', alignItems: 'end', marginBottom: '1rem' }}>
+          <label className="sequence-field"><span className="stat-label">Name</span><input className="hud-input" value={destinationDraft.name} onChange={(e) => setDestinationDraft((prev) => ({ ...prev, name: e.target.value }))} /></label>
+          <div>
+            <ObsidianDropdown
+              label="Kind"
+              value={destinationDraft.kind}
+              onChange={(value) => setDestinationDraft((prev) => ({ ...prev, kind: value }))}
+              options={[{ label: 'Webhook', value: 'webhook' }, { label: 'Smartlead', value: 'smartlead' }, { label: 'Mailead', value: 'mailead' }]}
+            />
+          </div>
+          <label className="sequence-field"><span className="stat-label">Target URL</span><input className="hud-input" value={destinationDraft.targetUrl} onChange={(e) => setDestinationDraft((prev) => ({ ...prev, targetUrl: e.target.value }))} /></label>
+          <button className="hud-btn primary" type="button" onClick={saveDestination}>Add</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          {destinations.length === 0 && <div className="drawer-empty">No outbound destinations configured.</div>}
+          {destinations.map((destination) => (
+            <div key={destination.id} className="list-item" style={{ marginBottom: 0 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600 }}>{destination.name}</div>
+                <div className="row-preview">{destination.kind} • {destination.target_url || destination.targetUrl || 'No URL'}</div>
+              </div>
+              <span className={`badge ${destination.is_active ? 'active' : 'neutral'}`}>{destination.is_active ? 'ACTIVE' : 'INACTIVE'}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="widget" style={{ gridColumn: 'span 6' }}>
+        <div className="widget-header"><div className="widget-title"><Globe size={16} /> LOCAL RUNTIME</div></div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          <div>
+            <ObsidianDropdown
+              label="Default Capture Mode"
+              value={runtime.captureMode}
+              onChange={(value) => updateRuntime('captureMode', value)}
+              options={[{ label: 'Full Capture', value: 'standard' }, { label: 'Fast Scan', value: 'fast' }]}
+            />
+          </div>
+          <div>
+            <ObsidianDropdown
+              label="Default Export Format"
+              value={runtime.defaultExportFormat}
+              onChange={(value) => updateRuntime('defaultExportFormat', value)}
+              options={[{ label: 'XLSX', value: 'xlsx' }, { label: 'CSV', value: 'csv' }]}
+            />
+          </div>
+          <div>
+            <ObsidianDropdown
+              label="Concurrency"
+              value={runtime.concurrencyLimit}
+              onChange={(value) => updateRuntime('concurrencyLimit', Number(value))}
+              options={[{ label: '2 parallel', value: 2 }, { label: '4 parallel', value: 4 }, { label: '8 parallel', value: 8 }]}
+            />
+          </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: 'pointer', padding: '1rem', background: 'rgba(255,255,255,0.02)', borderRadius: 'var(--radius-md)', border: '1px solid var(--glass-border)' }}>
+            <input type="checkbox" checked={runtime.includeTimestamps} onChange={(e) => updateRuntime('includeTimestamps', e.target.checked)} style={{ width: '18px', height: '18px', accentColor: 'var(--accent-cyan)' }} />
+            <div>
+              <div style={{ fontWeight: 500 }}>Include timestamps</div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Applied to local exports only.</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div className="widget" style={{ gridColumn: 'span 6' }}>
+        <div className="widget-header"><div className="widget-title"><KeyRound size={16} /> ACCOUNT</div></div>
+        <div className="list-item" style={{ marginBottom: 0 }}>
+          <div style={{ width: '40px', height: '40px', borderRadius: '50%', background: 'linear-gradient(135deg, var(--accent-cyan) 0%, #22c55e 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.1rem', fontWeight: 600 }}>
+            {user?.email?.[0]?.toUpperCase() || 'U'}
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 600 }}>{user?.email || 'Not signed in'}</div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Server-backed branding and outbound configuration enabled.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

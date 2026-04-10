@@ -64,7 +64,7 @@ Verify that the Google Maps ingestion migration preserves current business workf
 ### Local Docker provider
 
 1. Configure:
-   - `MAPS_SCRAPER_PROVIDER=docker`
+   - `MAPS_SCRAPER_PROVIDER=local-docker`
 2. Start the server with valid env vars.
 3. Submit a small query such as `plumbers` + `Austin, TX`.
 4. Confirm:
@@ -76,7 +76,7 @@ Verify that the Google Maps ingestion migration preserves current business workf
 ### Remote provider
 
 1. Configure:
-   - `MAPS_SCRAPER_PROVIDER=remote`
+   - `MAPS_SCRAPER_PROVIDER=external-rest`
    - `MAPS_SCRAPER_BASE_URL`
 2. Repeat the same query.
 3. Confirm provider job id is written into metadata.

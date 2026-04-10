@@ -53,7 +53,9 @@ export async function importMapsLeads({
   }
 
   if (normalized.leads.length === 0) {
-    throw new Error('Maps scraper returned no valid leads.');
+    const error = new Error('Maps scraper returned no valid leads.');
+    error.statusCode = 422;
+    throw error;
   }
 
   const importStats = {

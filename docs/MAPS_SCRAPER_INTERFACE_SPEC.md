@@ -34,7 +34,7 @@ This boundary is used by:
 
 ```js
 {
-  provider: 'docker-cli' | 'binary-cli' | 'remote-api',
+  provider: 'local-docker' | 'local-binary' | 'external-rest',
   version: 'gosom/google-maps-scraper:latest',
   providerJobId: 'optional-remote-job-id',
   results: [/* upstream raw rows */],
@@ -136,7 +136,8 @@ Partial failures are not fatal if at least one normalized lead remains. Invalid 
 
 ## Configuration Surface
 
-- `MAPS_SCRAPER_PROVIDER=docker|binary|remote`
+- `MAPS_SCRAPER_PROVIDER=local-docker|local-binary|external-rest`
+  Aliases accepted in code: `docker`, `binary`, `remote`
 - `MAPS_SCRAPER_DOCKER_IMAGE`
 - `MAPS_SCRAPER_BINARY_PATH`
 - `MAPS_SCRAPER_BASE_URL`

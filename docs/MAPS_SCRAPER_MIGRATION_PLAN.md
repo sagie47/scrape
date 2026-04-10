@@ -96,13 +96,13 @@ These are written through:
 
 ### Default runtime
 
-- `MAPS_SCRAPER_PROVIDER=docker`
+- `MAPS_SCRAPER_PROVIDER=local-docker`
 - `MAPS_SCRAPER_DOCKER_IMAGE=gosom/google-maps-scraper:latest`
 
 ### Remote runtime
 
 - Run gosom in web/API mode on a separate VPS
-- Set `MAPS_SCRAPER_PROVIDER=remote`
+- Set `MAPS_SCRAPER_PROVIDER=external-rest`
 - Set `MAPS_SCRAPER_BASE_URL=https://<scraper-host>`
 - Keep the app talking only to the internal adapter contract
 
@@ -123,7 +123,7 @@ These are written through:
 ## Rollout Plan
 
 1. Apply migration `006_maps_scraper_ingestion.sql`.
-2. Deploy code with `MAPS_SCRAPER_PROVIDER=docker`.
+2. Deploy code with `MAPS_SCRAPER_PROVIDER=local-docker`.
 3. Run a low-volume smoke test.
 4. Verify job metadata and `job_events`.
 5. Verify leads still appear in the UI and can be analyzed/exported.

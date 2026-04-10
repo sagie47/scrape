@@ -14,6 +14,39 @@ import { importMapsLeads } from "../services/maps-import-pipeline.js";
 
 const router = express.Router();
 
+function createLeadsWorkbook(leads) {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Leads");
+
+    worksheet.columns = [
+        { header: "Name", key: "name", width: 30 },
+        { header: "Email", key: "email", width: 35 },
+        { header: "Address", key: "address", width: 40 },
+        { header: "Phone", key: "phone", width: 20 },
+        { header: "Website", key: "website", width: 40 },
+        { header: "Rating", key: "rating", width: 10 },
+        { header: "Reviews", key: "reviews", width: 10 },
+        { header: "Source", key: "source", width: 24 }
+    ];
+
+    leads.forEach((lead) => {
+        worksheet.addRow({
+            name: lead.name || "",
+            email: lead.email || "",
+            address: lead.address || "",
+            phone: lead.phone || "",
+            website: lead.website || "",
+            rating: lead.rating || "",
+            reviews: lead.reviews || "",
+            source: lead.source || ""
+        });
+    });
+
+    worksheet.getRow(1).font = { bold: true };
+
+    return workbook;
+}
+
 /**
  * POST /scrape-leads - Scrape leads from Google Maps via adapter pipeline
  */
@@ -55,7 +88,8 @@ router.post("/scrape-leads", requireAuth, express.json(), asyncHandler(async (re
 
         const status = error.statusCode || 500;
         return res.status(status).json({
-            error: error.message
+            error: error.message,
+            jobId: job.id
         });
     }
 }));
@@ -79,30 +113,7 @@ router.post("/export-leads", requireAuth, express.json(), asyncHandler(async (re
         return res.status(400).json({ error: "Leads array is required." });
     }
 
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet("Leads");
-
-    worksheet.columns = [
-        { header: "Name", key: "name", width: 30 },
-        { header: "Address", key: "address", width: 40 },
-        { header: "Phone", key: "phone", width: 20 },
-        { header: "Website", key: "website", width: 40 },
-        { header: "Rating", key: "rating", width: 10 },
-        { header: "Reviews", key: "reviews", width: 10 }
-    ];
-
-    leads.forEach((lead) => {
-        worksheet.addRow({
-            name: lead.name || "",
-            address: lead.address || "",
-            phone: lead.phone || "",
-            website: lead.website || "",
-            rating: lead.rating || "",
-            reviews: lead.reviews || ""
-        });
-    });
-
-    worksheet.getRow(1).font = { bold: true };
+    const workbook = createLeadsWorkbook(leads);
 
     res.setHeader(
         "Content-Type",
@@ -130,30 +141,7 @@ router.get("/export-my-leads", requireAuth, asyncHandler(async (req, res) => {
         return res.status(400).json({ error: "No leads to export" });
     }
 
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet("Leads");
-
-    worksheet.columns = [
-        { header: "Name", key: "name", width: 30 },
-        { header: "Address", key: "address", width: 40 },
-        { header: "Phone", key: "phone", width: 20 },
-        { header: "Website", key: "website", width: 40 },
-        { header: "Rating", key: "rating", width: 10 },
-        { header: "Reviews", key: "reviews", width: 10 }
-    ];
-
-    leads.forEach((lead) => {
-        worksheet.addRow({
-            name: lead.name || "",
-            address: lead.address || "",
-            phone: lead.phone || "",
-            website: lead.website || "",
-            rating: lead.rating || "",
-            reviews: lead.reviews || ""
-        });
-    });
-
-    worksheet.getRow(1).font = { bold: true };
+    const workbook = createLeadsWorkbook(leads);
 
     if (format === "csv") {
         res.setHeader("Content-Type", "text/csv");

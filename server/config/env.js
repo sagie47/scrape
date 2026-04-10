@@ -11,10 +11,13 @@ const required = [
 ];
 
 const missing = required.filter((key) => !process.env[key]);
+const isTestEnv = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
 if (missing.length > 0) {
     console.error(`❌ Missing required environment variables: ${missing.join(", ")}`);
     console.error("Add them to your .env file and restart the server.");
-    process.exit(1);
+    if (!isTestEnv) {
+        process.exit(1);
+    }
 }
 
 export const config = {

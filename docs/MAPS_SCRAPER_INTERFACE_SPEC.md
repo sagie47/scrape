@@ -2,320 +2,165 @@
 
 ## Purpose
 
-Define a stable internal boundary between the app and `gosom/google-maps-scraper` so the product can change providers without rewriting route logic, lead normalization, or downstream workflows.
+Define a stable internal boundary between app logic and the upstream Google Maps scraper so the ingestion path can change providers without rewriting route, persistence, export, campaign, or artifact logic.
 
-## Current Flow To Preserve
+## Scope
 
-The current user path is:
+This boundary is used by:
 
-`client/src/App.jsx` -> `POST /scrape-leads` -> `server/routes/leads.routes.js` -> `db.saveLeads()` -> `leads`, `campaigns`, `exports`, and `artifacts`.
+- `POST /scrape-leads`
+- lead persistence in `server/services/db.js`
+- downstream lead reads used by campaigns, exports, outreach, and mini audit generation
 
-The new ingestion layer must preserve:
+## Internal Contract
 
-- `POST /scrape-leads` as the entry point used by the UI.
-- The response shape expected by the current client: `jobId` plus a `leads` array.
-- Downstream consumers of the `leads` table, including `GET /leads`, `POST /analyze-leads`, `POST /export-leads`, `GET /export-my-leads`, campaign exports, and artifact generation.
+### Inbound request
 
-## Boundary
-
-The app must not call gosom directly from route handlers. All scraper interaction goes through three internal modules:
-
-- `server/services/maps-scraper-adapter.js`
-- `server/services/maps-normalizer.js`
-- `server/services/maps-import-pipeline.js`
-
-These modules are provider-agnostic at the route boundary. The route should know only that it can submit a scrape request and receive a run summary plus normalized leads.
-
-## Recommended Provider Modes
-
-The adapter must support these execution modes behind the same interface:
-
-| Mode | Transport | Use case |
-|---|---|---|
-| `local-docker` | Shell out to `docker run` with gosom | Default for this repo. Docker is available locally, so this is the lowest-blast-radius path. |
-| `external-rest` | HTTP to gosom web mode (`/api/v1/jobs`) | Best when the scraper runs on a dedicated VPS or shared scraper host. |
-| `postgres-worker` | Producer/worker mode via PostgreSQL queue | Best for horizontal scale and long-running distributed jobs. |
-
-Recommendation: use `local-docker` first, keep `external-rest` as the operational scale-up path, and keep `postgres-worker` for later if queue-based distributed scraping becomes necessary.
-
-## Input Schema
-
-### Internal Request
-
-```ts
-type MapsScrapeRequest = {
-  requestId: string;
-  userId: string;
-  jobId: string;
-  keyword: string;
-  location?: string;
-  limit: number;
-  language?: string;
-  emailExtraction?: boolean;
-  extraReviews?: boolean;
-  providerMode?: 'local-docker' | 'external-rest' | 'postgres-worker';
-  source?: 'ui' | 'api' | 'backfill';
-  traceId?: string;
-};
-```
-
-### Expected Gosom Job Input
-
-The adapter may translate the internal request into either:
-
-- a gosom query file, or
-- a REST job payload, or
-- a producer record for distributed execution.
-
-The adapter must not leak those provider details into route code.
-
-## Raw Gosom Payload
-
-The adapter must accept the actual upstream field names emitted by gosom. Representative fields include:
-
-```json
+```js
 {
-  "title": "Example Plumbing",
-  "address": "123 Main St, Kelowna, BC",
-  "phone": "+1 250 555 0100",
-  "web_site": "https://example.com",
-  "review_rating": 4.7,
-  "review_count": 128,
-  "latitude": 49.888,
-  "longtitude": -119.496,
-  "cid": "1234567890123456789",
-  "place_id": "ChIJ....",
-  "emails": ["info@example.com"],
-  "complete_address": "123 Main St, Kelowna, BC V1X 1X1, Canada",
-  "link": "https://www.google.com/maps?cid=1234567890123456789"
+  query: 'plumbers in Austin, TX',
+  limit: 25,
+  language: 'en',
+  depth: 1,
+  concurrency: 1,
+  includeEmails: false,
+  fastMode: false,
+  exitOnInactivity: '3m',
+  timeoutMs: 180000
 }
 ```
 
-Important: `longtitude` is the upstream field name. The normalizer must map it to `longitude` internally and never expose the typo outside the adapter boundary.
+### Adapter response
 
-## Canonical Normalized Record
+```js
+{
+  provider: 'docker-cli' | 'binary-cli' | 'remote-api',
+  version: 'gosom/google-maps-scraper:latest',
+  providerJobId: 'optional-remote-job-id',
+  results: [/* upstream raw rows */],
+  diagnostics: {
+    stderr: 'optional process stderr',
+    statusResponse: {/* optional remote status payload */}
+  }
+}
+```
 
-The normalizer must convert raw gosom output into a canonical lead record that is safe to persist and safe for downstream exports.
+### Normalized lead shape
 
-```ts
-type NormalizedLead = {
-  source: 'google-maps-scraper';
-  name: string;
-  address?: string;
-  phone?: string;
-  website?: string;
-  rating?: number;
-  reviews?: number;
-  coordinates?: { lat: number; lng: number };
-  placeId?: string;
-  cid?: string;
-  emails?: string[];
-  mapsUrl?: string;
-  completeAddress?: string;
-  raw?: Record<string, unknown>;
-  ingestStatus: 'accepted' | 'rejected' | 'duplicate' | 'partial';
-  rejectReason?: string;
-  sourceMetadata?: {
-    providerMode: string;
-    keyword: string;
-    location?: string;
-    requestId: string;
-    jobId: string;
-    scrapedAt: string;
-  };
-};
+```js
+{
+  name: 'Alpha Plumbing',
+  address: '123 Main St, Austin, TX',
+  phone: '+1 512-555-0100',
+  email: 'hello@alphaplumbing.com',
+  website: 'https://alphaplumbing.com/',
+  rating: 4.8,
+  reviews: 128,
+  placeId: 'place-alpha',
+  mapsUrl: 'https://maps.google.com/?cid=cid-alpha',
+  coordinates: { lat: 30.2672, lng: -97.7431 },
+  categories: ['Plumber'],
+  source: 'google-maps-scraper',
+  sourceMetadata: {
+    query: 'plumbers in Austin, TX',
+    cid: 'cid-alpha',
+    dataId: 'optional',
+    rawStatus: 'optional',
+    mapsUrl: 'https://maps.google.com/?cid=cid-alpha',
+    categories: ['Plumber']
+  },
+  dedupeKey: 'place:place-alpha'
+}
 ```
 
 ## Validation Rules
 
-Validation happens before persistence.
-
-- Accept a record only if it has a non-empty business name.
-- Prefer `place_id` as the primary identity key.
-- Fall back to `cid` if `place_id` is missing.
-- Fall back to normalized website plus name plus address only when both IDs are absent.
-- Normalize `web_site` to an absolute `https://` or `http://` URL.
-- Normalize `review_rating` to a number in the range `0..5`.
-- Normalize `review_count` to a non-negative integer.
-- Convert `latitude`, `longtitude`, and other coordinate fields to numeric floats.
-- Deduplicate `emails`, lowercase them, and strip invalid values.
-- Prefer `complete_address` when `address` is missing or incomplete.
-- Reject records that fail minimum identity requirements, and emit a structured rejection reason.
+- `name` is required.
+- At least one of `placeId`, `website`, `phone`, or `address` must exist.
+- `website` is normalized through the existing URL normalizer.
+- `rating` must be numeric if present.
+- `reviews` must be integer if present.
+- Coordinates are dropped if either latitude or longitude is invalid.
 
 ## Dedupe Rules
 
-Dedupe must happen in two places:
+- Primary key: `placeId`
+- Secondary key: normalized `website`
+- Fallback key: `name + address + phone`
+- Collision policy: keep the richer record, measured by filled fields such as website, email, phone, reviews, rating, coordinates, and categories
 
-1. Within the current scrape run.
-2. Against already persisted leads for the same user.
+## Persistence Rules
 
-Priority order:
-
-1. `place_id`
-2. `cid`
-3. normalized `website`
-4. normalized `name + address`
-
-When two records collide, keep the richer record:
-
-- prefer a record with `place_id`
-- prefer a record with `website`
-- prefer a record with more complete contact data
-- prefer a record with non-empty coordinates
-- prefer a record with more recent scrape metadata only when all other richness is equal
-
-## Adapter Contract
-
-### `maps-scraper-adapter.js`
-
-```ts
-type ScrapeStartResult = {
-  runId: string;
-  status: 'queued' | 'running' | 'staged' | 'imported' | 'failed' | 'partial';
-  providerMode: 'local-docker' | 'external-rest' | 'postgres-worker';
-};
-
-type ScrapePollResult = {
-  runId: string;
-  status: 'running' | 'staged' | 'imported' | 'failed' | 'partial';
-  rawCount: number;
-  exitCode?: number;
-  error?: string;
-  artifactRef?: string;
-};
-```
-
-Responsibilities:
-
-- submit the job to gosom
-- wait or poll until raw output is ready
-- capture stderr, exit codes, and timeouts
-- return a stable status object regardless of provider mode
-
-### `maps-normalizer.js`
-
-```ts
-type NormalizeResult = {
-  accepted: NormalizedLead[];
-  rejected: { reason: string; raw: Record<string, unknown> }[];
-  duplicates: { raw: Record<string, unknown>; dedupeKey: string }[];
-};
-```
-
-Responsibilities:
-
-- map upstream fields to canonical app fields
-- validate and score record completeness
-- compute dedupe keys
-- preserve raw payload for replay/debugging
-
-### `maps-import-pipeline.js`
-
-```ts
-type ImportSummary = {
-  jobId: string;
-  runId: string;
-  requested: number;
-  rawCount: number;
-  normalizedCount: number;
-  persistedCount: number;
-  duplicateCount: number;
-  rejectedCount: number;
-  partialFailureCount: number;
-  durationMs: number;
-};
-```
-
-Responsibilities:
-
-- orchestrate adapter submission
-- normalize and validate raw records
-- dedupe within-run and across historical leads
-- persist accepted leads through the existing `db.saveLeads` contract or a compatible replacement
-- emit job events and metrics for every phase
+- Existing `place_id` matches are updated, not duplicated.
+- Keyword tags are merged, not replaced.
+- `source` is set to `google-maps-scraper`.
+- `source_metadata` stores provider, provider job id, query, and selected upstream identifiers.
+- `last_scraped_at` is refreshed on every successful import.
 
 ## Error Contract
 
-Errors must be structured and distinguishable at the pipeline boundary.
+Adapter errors are surfaced as typed failures:
 
-```ts
-type MapsScrapeError = {
-  stage: 'submit' | 'poll' | 'parse' | 'normalize' | 'dedupe' | 'persist';
-  code: string;
-  message: string;
-  retryable: boolean;
-  providerMode: string;
-  details?: Record<string, unknown>;
-};
-```
+- `maps_scraper_query_missing` -> `400`
+- `maps_scraper_launch_failed` -> `503`
+- `maps_scraper_provider_invalid` -> `503`
+- `maps_scraper_timeout` -> `504`
+- `maps_scraper_remote_*` -> `502`/`503`/`504`
 
-Rules:
+Route behavior:
 
-- Retry transient submit/poll failures.
-- Do not retry invalid payloads or failed validation.
-- Return partial results when some records are rejected or deduped.
-- Mark the run `partial` when some records succeeded and some failed.
-- Mark the run `failed` only when the pipeline cannot produce any trusted records or the provider is unavailable.
+- Fail the job
+- Log an error event
+- Return `{ error }` with a meaningful HTTP status
 
-## Observability Contract
+Partial failures are not fatal if at least one normalized lead remains. Invalid rows and duplicate counts are logged to `job_events`.
 
-Every run should emit:
+## Provider Modes
 
-- `scrape_started`
-- `scrape_submitted`
-- `scrape_polled`
-- `scrape_staged`
-- `scrape_normalized`
-- `scrape_deduped`
-- `scrape_persisted`
-- `scrape_partial_failure`
-- `scrape_failed`
-- `scrape_completed`
+### Default: local Docker CLI
 
-Minimum event metadata:
+- Runs `gosom/google-maps-scraper` as a one-shot process
+- Lowest blast radius inside the existing server
+- No new always-on infrastructure required
 
-- `jobId`
-- `runId`
-- `providerMode`
-- `keyword`
-- `location`
-- `rawCount`
-- `normalizedCount`
-- `persistedCount`
-- `duplicateCount`
-- `rejectedCount`
-- `durationMs`
-- `errorCode`
+### Optional: local binary CLI
 
-## Compatibility Guarantees
+- Same contract as Docker mode
+- Useful when the binary is preinstalled on a VPS
 
-- The UI may keep calling `POST /scrape-leads`.
-- The route may still return `jobId` and `leads`.
-- Existing consumers of `leads` must continue to see `name`, `address`, `phone`, `website`, `rating`, `reviews`, `placeId`, `tags`, and `createdAt`.
-- Additional fields like `cid`, `emails`, `mapsUrl`, and `completeAddress` may be added, but must not break current payloads.
+### Optional: remote API
 
-## Mermaid
+- Uses gosom web/API mode on another VPS
+- Good for isolation and independent scaling
+- Should only be enabled through config, never hard-coded into route logic
+
+## Configuration Surface
+
+- `MAPS_SCRAPER_PROVIDER=docker|binary|remote`
+- `MAPS_SCRAPER_DOCKER_IMAGE`
+- `MAPS_SCRAPER_BINARY_PATH`
+- `MAPS_SCRAPER_BASE_URL`
+- `MAPS_SCRAPER_API_KEY`
+- `MAPS_SCRAPER_CONCURRENCY`
+- `MAPS_SCRAPER_DEPTH`
+- `MAPS_SCRAPER_LANG`
+- `MAPS_SCRAPER_EXIT_ON_INACTIVITY`
+- `MAPS_SCRAPER_TIMEOUT_MS`
+- `MAPS_SCRAPER_REMOTE_POLL_MS`
+- `MAPS_SCRAPER_INCLUDE_EMAILS`
+- `MAPS_SCRAPER_FAST_MODE`
+
+## Data Flow
 
 ```mermaid
-sequenceDiagram
-  participant UI as Client UI
-  participant Route as POST /scrape-leads
-  participant Pipeline as maps-import-pipeline
-  participant Adapter as maps-scraper-adapter
-  participant Gosom as gosom/google-maps-scraper
-  participant Normalizer as maps-normalizer
-  participant DB as leads / job_events
-
-  UI->>Route: keyword, location, limit
-  Route->>Pipeline: startScrape(request)
-  Pipeline->>Adapter: submit job
-  Adapter->>Gosom: CLI / REST / worker
-  Gosom-->>Adapter: raw records
-  Adapter-->>Pipeline: raw payload + run status
-  Pipeline->>Normalizer: normalize(raw records)
-  Normalizer-->>Pipeline: accepted / rejected / duplicate
-  Pipeline->>DB: persist accepted leads
-  Pipeline->>DB: emit job events + counts
-  Pipeline-->>Route: summary + leads
-  Route-->>UI: jobId + leads
+flowchart LR
+  UI[Lead scraper UI] --> ROUTE[/POST /scrape-leads/]
+  ROUTE --> PIPE[Maps import pipeline]
+  PIPE --> ADAPTER[Maps scraper adapter]
+  ADAPTER --> PROVIDER[Docker CLI or Binary or Remote API]
+  PROVIDER --> PIPE
+  PIPE --> NORMALIZE[Normalize + validate + dedupe]
+  NORMALIZE --> DB[(leads)]
+  PIPE --> EVENTS[(job_events)]
+  DB --> DOWNSTREAM[Campaigns, exports, outreach, mini audits]
 ```

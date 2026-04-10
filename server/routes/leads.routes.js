@@ -10,11 +10,12 @@ import ExcelJS from "exceljs";
 import { requireAuth } from "../middleware/auth.js";
 import { asyncHandler } from "../middleware/error-handler.js";
 import * as db from "../services/db.js";
+import { importMapsLeads } from "../services/maps-import-pipeline.js";
 
 const router = express.Router();
 
 /**
- * POST /scrape-leads - Scrape leads from Google Places via Serper API
+ * POST /scrape-leads - Scrape leads from Google Maps via adapter pipeline
  */
 router.post("/scrape-leads", requireAuth, express.json(), asyncHandler(async (req, res) => {
     const { keyword, location } = req.body;
@@ -25,65 +26,37 @@ router.post("/scrape-leads", requireAuth, express.json(), asyncHandler(async (re
     }
 
     const limit = parseInt(req.body.limit) || 10;
-    const query = location ? `${keyword} in ${location}` : keyword;
-    const apiKey = process.env.SERPER_API_KEY;
-
-    if (!apiKey) {
-        return res.status(500).json({ error: "Missing SERPER_API_KEY in environment." });
-    }
 
     // Create a job to track this scrape batch
     const batchName = location ? `${keyword} in ${location}` : keyword;
     const job = await db.createJob(userId, "leads", {
         name: batchName,
         keyword,
-        location
+        location,
+        source: 'google-maps-scraper'
     });
 
-    const allPlaces = [];
     try {
-        while (allPlaces.length < limit) {
-            const response = await fetch("https://google.serper.dev/places", {
-                method: "POST",
-                headers: {
-                    "X-API-KEY": apiKey,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ q: query }),
-            });
-
-            const data = await response.json();
-            if (!data.places || data.places.length === 0) break;
-
-            allPlaces.push(...data.places);
-            break;
-        }
-
-        // Map to cleaner format and persist to DB
-        const leads = allPlaces.slice(0, limit).map((p) => ({
-            name: p.title,
-            address: p.address,
-            phone: p.phoneNumber,
-            website: p.website,
-            rating: p.rating,
-            reviews: p.ratingCount,
-            placeId: p.placeId || p.cid,
-            coordinates: p.latitude && p.longitude ? { lat: p.latitude, lng: p.longitude } : null
-        }));
-
-        // Persist leads to database with job reference
-        const savedLeads = await db.saveLeads(userId, leads, { keyword, location, jobId: job.id });
-
-        // Mark job as complete
-        await db.completeJob(job.id, savedLeads.length);
-
-        return res.json({
-            jobId: job.id,
-            leads: savedLeads
+        const result = await importMapsLeads({
+            userId,
+            keyword,
+            location,
+            limit,
+            jobId: job.id
         });
+
+        return res.json(result);
     } catch (error) {
         await db.failJob(job.id, error.message);
-        throw error;
+        await db.logEvent(job.id, 'error', 'Maps scraper ingestion failed.', {
+            message: error.message,
+            code: error.code || 'maps_scraper_route_error'
+        });
+
+        const status = error.statusCode || 500;
+        return res.status(status).json({
+            error: error.message
+        });
     }
 }));
 

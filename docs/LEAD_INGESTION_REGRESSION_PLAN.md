@@ -1,150 +1,98 @@
 # Lead Ingestion Regression Plan
 
-## Objective
+## Goal
 
-Prove that the new Google Maps ingestion path preserves current user-visible workflows while improving normalization, dedupe, and observability.
+Verify that the Google Maps ingestion migration preserves current business workflows while improving normalization, dedupe, and observability.
 
-## What Must Keep Working
+## Test Areas
 
-- `POST /scrape-leads`
-- `GET /leads`
-- `POST /analyze-leads`
-- `POST /export-leads`
-- `GET /export-my-leads`
-- campaign lead selection and export flows
-- artifact generation from saved leads
+### 1. Normalization
 
-## Test Strategy
+- gosom rows map to the expected internal lead shape
+- `web_site` becomes normalized `website`
+- `review_rating` and `review_count` map cleanly
+- first valid email is surfaced as `lead.email`
+- `complete_address` fills `address` when direct `address` is absent
 
-The regression suite should cover four layers:
+### 2. Validation
 
-1. Adapter contract tests.
-2. Normalization and validation tests.
-3. Pipeline integration tests.
-4. Route compatibility tests.
+- rows without `name` are rejected
+- rows without any durable contact or identity fields are rejected
+- malformed URLs are dropped without crashing the import
 
-## Fixture Set
+### 3. Dedupe
 
-Use gosom-shaped payloads with exact upstream field names.
+- duplicate `place_id` rows collapse into one lead
+- duplicate websites collapse into one lead when `place_id` is missing
+- richer records win on collision
 
-### Fixture 1: Minimal valid lead
+### 4. Persistence
 
-```json
-{
-  "title": "Kelowna Plumbing Co",
-  "address": "123 Main St, Kelowna, BC",
-  "phone": "+1 250 555 0100",
-  "web_site": "https://kelownaplumbing.example",
-  "review_rating": 4.8,
-  "review_count": 142,
-  "latitude": 49.888,
-  "longtitude": -119.496,
-  "cid": "1234567890123456789",
-  "place_id": "ChIJ123",
-  "emails": ["info@kelownaplumbing.example"],
-  "complete_address": "123 Main St, Kelowna, BC V1X 1X1, Canada",
-  "link": "https://www.google.com/maps?cid=1234567890123456789"
-}
-```
+- new leads insert successfully
+- existing `place_id` leads update instead of duplicating
+- keyword tags are merged
+- `source` is `google-maps-scraper`
+- `source_metadata` and `last_scraped_at` are populated
 
-### Fixture 2: Rich lead with duplicates in `emails`
+### 5. Route compatibility
 
-- repeated email addresses
-- uppercase website / mixed-case email
-- valid `place_id`
-- valid `cid`
+- `POST /scrape-leads` still returns `{ jobId, leads, stats }`
+- `GET /leads` still returns saved leads for the current user
+- `POST /analyze-leads` still accepts returned leads with `website`
 
-### Fixture 3: Duplicate candidate with different richness
+### 6. Downstream workflow safety
 
-- same `place_id`
-- missing website in one record
-- richer contact data in the other record
+- campaign builder still reads lead rows
+- lead export still works with saved lead records
+- artifact generation still finds the lead by id
+- memo/outreach generation still receives lead email/website/phone data as before
 
-### Fixture 4: Missing `place_id`, fallback to `cid`
+### 7. Observability
 
-- no `place_id`
-- valid `cid`
-- should still dedupe within the run and across runs
+- job status transitions to `running` then `done` or `error`
+- `job_events` capture invalid row counts, duplicate counts, and failures
+- `jobs.metadata.leadImport` captures provider and row counts
 
-### Fixture 5: Partial failure
-
-- malformed `review_rating`
-- invalid `latitude` or `longtitude`
-- still emit a structured rejection rather than crashing the run
-
-## Regression Cases
-
-### Normalization
-
-- `title` becomes `name`
-- `web_site` becomes `website`
-- `review_rating` becomes `rating`
-- `review_count` becomes `reviews`
-- `longtitude` becomes `longitude`
-- `complete_address` is retained as `completeAddress`
-- `link` is retained as `mapsUrl`
-
-### Validation
-
-- reject records without a usable business name
-- reject records with unusable numeric fields only when those fields are needed for downstream compatibility
-- accept records with partial data when identity fields exist
-
-### Dedupe
-
-- prefer `place_id` over all other keys
-- fall back to `cid`
-- then fall back to normalized `website`
-- then fall back to normalized `name + address`
-
-### Persistence
-
-- ensure `db.saveLeads` or its compatible replacement still writes the fields downstream consumers expect
-- ensure `source` identifies the new provider
-- ensure saved leads remain usable by exports and campaigns
-
-### Partial Failure Handling
-
-- one bad raw row must not fail the entire run
-- a run with mixed accepted and rejected rows should be marked partial
-- the response should include counts for raw, accepted, duplicate, rejected, and persisted rows
-
-### Observability
-
-- run status should be visible
-- error messages should include the stage
-- counts should be emitted for raw, normalized, deduped, persisted, and rejected rows
-- trace metadata should include keyword, location, provider mode, and request id
-
-## Suggested Test Files
+## Automated Coverage Added
 
 - `server/services/maps-normalizer.test.js`
 - `server/services/maps-import-pipeline.test.js`
-- `server/services/maps-scraper-adapter.test.js`
-- `server/routes/leads.routes.test.js`
+- `server/test/fixtures/gosom-sample-results.json`
 
-## Suggested Assertions
+## Manual Smoke Tests
 
-- raw gosom JSON is accepted as input
-- invalid rows are rejected without throwing away valid rows
-- duplicate rows collapse to one persisted lead
-- `/scrape-leads` still returns `jobId` and `leads`
-- downstream exports still see the normalized fields
-- artifact generation can still read the saved lead shape
+### Local Docker provider
 
-## Execution Commands
+1. Configure:
+   - `MAPS_SCRAPER_PROVIDER=docker`
+2. Start the server with valid env vars.
+3. Submit a small query such as `plumbers` + `Austin, TX`.
+4. Confirm:
+   - leads render in the scraper UI
+   - `job_events` contain import diagnostics
+   - lead export still downloads
+   - analyze flow still starts for leads with websites
 
-When the implementation lands, run the relevant tests and checks:
+### Remote provider
 
-- `npx vitest run`
-- `npx vitest run server/services/maps-normalizer.test.js`
-- `npx vitest run server/services/maps-import-pipeline.test.js`
+1. Configure:
+   - `MAPS_SCRAPER_PROVIDER=remote`
+   - `MAPS_SCRAPER_BASE_URL`
+2. Repeat the same query.
+3. Confirm provider job id is written into metadata.
 
-If route or schema behavior changes, add any needed integration coverage before cutover.
+## Failure Cases To Exercise
+
+- Docker unavailable
+- remote provider timeout
+- remote provider failed job
+- zero valid leads after normalization
+- mixed valid and invalid rows
 
 ## Exit Criteria
 
-- No regression in the current lead acquisition UI.
-- No regression in saved lead shape used by exports and campaigns.
-- Partial failures are visible and actionable.
-- Duplicate suppression improves or remains stable against the current baseline.
+- normalization and pipeline tests pass
+- client build passes
+- `/scrape-leads` produces leads in the UI
+- exports and analyze flow still work
+- row-count telemetry is visible in job metadata and events

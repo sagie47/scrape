@@ -1,131 +1,146 @@
 # Maps Scraper Migration Plan
 
-## Goal
+## Objective
 
-Replace the current brittle Serper-based lead discovery path with a stable ingestion subsystem built around `gosom/google-maps-scraper`, while preserving current lead generation, dedupe, export, and artifact workflows.
+Replace the direct Serper-based Google Maps lead discovery route with a production-safe ingestion subsystem around `gosom/google-maps-scraper`, while preserving existing lead-generation workflows.
 
 ## Current State
 
-The current path is:
-
-`client/src/App.jsx` -> `POST /scrape-leads` -> `server/routes/leads.routes.js` -> `db.saveLeads()` -> `leads` -> `GET /leads`, `POST /analyze-leads`, exports, campaigns, artifacts.
-
-The existing route directly calls Serper and maps raw fields inline. That is the failure point we are removing.
-
-## Recommendation
-
-Use a provider-agnostic internal ingestion boundary with a default `local-docker` provider.
-
-### Why `local-docker` first
-
-- Docker is available locally, so the provider is operationally feasible now.
-- It isolates the upstream scraper from the app process.
-- It keeps the initial blast radius small.
-- It avoids coupling route code to gosom implementation details.
-
-### Why not couple directly to gosom internals
-
-- gosom exposes multiple execution modes.
-- The app should not know whether the provider is using CLI, REST, or distributed jobs.
-- Future provider swaps should require changes only in `maps-scraper-adapter.js`.
-
-### Scale-up path
-
-When local shell-out becomes too slow or too expensive, switch the adapter to `external-rest` or `postgres-worker` without changing route logic or normalization logic.
-
-## Architecture
+Current path:
 
 ```mermaid
 flowchart LR
-  UI[Client UI] --> R[POST /scrape-leads]
-  R --> P[maps-import-pipeline]
-  P --> A[maps-scraper-adapter]
-  A --> G[gosom/google-maps-scraper]
-  G --> N[maps-normalizer]
-  N --> D[(Supabase leads)]
-  N --> RQ[(gmaps_scrape_runs / raw places)]
-  P --> J[(job_events)]
-  D --> X[exports / campaigns / artifacts]
+  UI[Lead scraper UI] --> ROUTE[/POST /scrape-leads/]
+  ROUTE --> SERPER[Serper Places API]
+  SERPER --> INLINE[Inline field mapping]
+  INLINE --> SAVE[db.saveLeads]
+  SAVE --> LEADS[(leads)]
+  LEADS --> DOWNSTREAM[Analyze leads, campaigns, exports, mini audits]
 ```
 
-## Proposed Phases
+Weak points:
 
-### Phase 0: Baseline
+- Route logic is tightly coupled to one vendor response shape.
+- Normalization and dedupe are implicit and shallow.
+- Observability is limited.
+- Partial failure handling is poor.
 
-- Document the current contract.
-- Confirm current client response shape.
-- Confirm downstream consumers still read from `leads`.
+## Recommended Architecture
 
-### Phase 1: Introduce the Boundary
+### Phase 1 recommendation
 
-- Add `maps-scraper-adapter.js`.
-- Add `maps-normalizer.js`.
-- Add `maps-import-pipeline.js`.
-- Keep the route signature stable.
-- Keep the existing `db.saveLeads` contract compatible.
-- Add raw capture and structured event logging.
+Use local Docker CLI mode as the default provider behind the new adapter boundary.
 
-### Phase 2: Cut Over to gosom
+Why:
 
-- Switch the route from Serper to the new adapter.
-- Use `local-docker` as the default provider.
-- Preserve a feature flag or environment switch for the legacy path during rollout.
+- Lowest blast radius
+- No new persistent service to operate
+- Works on the current VPS because Docker is already available
+- Keeps the route synchronous, preserving current UI expectations
 
-### Phase 3: Harden Operations
+### Phase 2 option
 
-- Add metrics for run success rate, partial failure rate, duplicate rate, and normalization rejects.
-- Add replay support from raw ingestion artifacts.
-- Tune batch size, timeout, and retry policy.
+Move the provider to gosom web/API mode on a separate VPS when volume, isolation, or scraping risk requires it. Keep the app boundary unchanged and switch only configuration.
 
-### Phase 4: Optional Externalization
+## Target Flow
 
-- If operational load grows, move the same adapter contract to a dedicated VPS-hosted gosom service.
-- Keep route and normalizer code unchanged.
+```mermaid
+flowchart TD
+  A[UI submits keyword/location] --> B[/POST /scrape-leads/]
+  B --> C[Create job]
+  C --> D[Maps import pipeline]
+  D --> E[Provider adapter]
+  E --> F[gosom provider]
+  F --> D
+  D --> G[Normalize and validate]
+  G --> H[Dedupe]
+  H --> I[Save or update leads]
+  D --> J[Write job metadata]
+  D --> K[Write job_events]
+  I --> L[Existing downstream flows]
+```
 
-## Migration Checklist
+## Implementation Checklist
 
-- Add the new adapter, normalizer, and pipeline modules.
-- Add environment configuration for provider mode and scraper endpoint.
-- Add a migration for run/raw-record tracking if not already present.
-- Preserve `POST /scrape-leads` response compatibility.
-- Add observability events for each ingestion phase.
-- Add fixtures for representative gosom payloads.
-- Add regression tests for dedupe, normalization, and partial failure handling.
-- Verify downstream consumers still work with normalized leads.
-- Roll out behind a feature flag or provider switch.
-- Keep the legacy path available until the new path is validated in production.
+- [x] Add `maps-scraper-adapter.js`
+- [x] Add `maps-normalizer.js`
+- [x] Add `maps-import-pipeline.js`
+- [x] Rewire `/scrape-leads` to the new pipeline
+- [x] Add provider config to `server/config/env.js`
+- [x] Add lead schema fields for email and ingestion metadata
+- [x] Add normalization and pipeline tests with gosom-shaped fixtures
+- [ ] Apply `supabase/migrations/006_maps_scraper_ingestion.sql`
+- [ ] Set production env vars for the chosen provider
+- [ ] Smoke-test `POST /scrape-leads` against a real query in the target environment
+- [ ] Monitor duplicate rate and invalid row counts after rollout
+
+## Observability Contract
+
+Every scrape job should expose:
+
+- provider name
+- provider job id when remote
+- raw row count
+- normalized row count
+- invalid row count
+- duplicate row count
+- saved lead count
+- final job status
+
+These are written through:
+
+- `jobs.metadata.leadImport`
+- `job_events`
+
+## Operational Guidance
+
+### Default runtime
+
+- `MAPS_SCRAPER_PROVIDER=docker`
+- `MAPS_SCRAPER_DOCKER_IMAGE=gosom/google-maps-scraper:latest`
+
+### Remote runtime
+
+- Run gosom in web/API mode on a separate VPS
+- Set `MAPS_SCRAPER_PROVIDER=remote`
+- Set `MAPS_SCRAPER_BASE_URL=https://<scraper-host>`
+- Keep the app talking only to the internal adapter contract
+
+### Risk controls
+
+- Start with `MAPS_SCRAPER_INCLUDE_EMAILS=false` to reduce runtime and legal risk
+- Keep concurrency conservative at first
+- Keep a hard timeout
+- Prefer one query per request until behavior is stable
+
+## Legal and Compliance Notes
+
+- Email extraction materially increases contact-data sensitivity and scraping footprint.
+- Review Google Maps terms, local privacy rules, and outreach requirements before enabling broader collection or automated follow-up.
+- Store only fields needed for business workflows and auditability.
+- Keep provider switching at config level so the app can be paused or redirected without invasive code rollback.
+
+## Rollout Plan
+
+1. Apply migration `006_maps_scraper_ingestion.sql`.
+2. Deploy code with `MAPS_SCRAPER_PROVIDER=docker`.
+3. Run a low-volume smoke test.
+4. Verify job metadata and `job_events`.
+5. Verify leads still appear in the UI and can be analyzed/exported.
+6. Observe duplicate and invalid ratios for the first production runs.
+7. Only then consider enabling email extraction or moving to a remote provider.
 
 ## Rollback Plan
 
-Rollback must be configuration-first.
+If gosom execution is unstable:
 
-1. Switch the provider mode back to the legacy scraper path.
-2. Stop sending new jobs to gosom.
-3. Keep existing normalized leads and raw records.
-4. Do not drop new tables or fields during rollback.
-5. Review `job_events` and raw artifacts to understand the failure mode before reattempting cutover.
+1. Set `MAPS_SCRAPER_PROVIDER` back to the last known-good option if one exists.
+2. If necessary, revert the route and pipeline commit while leaving the schema migration in place.
+3. Keep new nullable columns; they are backward-compatible.
+4. Confirm `/scrape-leads`, exports, and campaigns still operate on existing leads.
 
-If the new path is already the default and needs to be disabled quickly, the route should fail over to a safe legacy provider setting rather than returning empty or partially corrupted leads.
+Rollback is low-risk because:
 
-## Operational Notes
-
-- Use timeouts and bounded retries for every external call.
-- Treat email extraction as optional because it increases runtime and failure surface.
-- Treat `review_count`, `review_rating`, and coordinates as enrichment, not hard requirements.
-- Keep raw payloads for replay and debugging, but avoid over-retaining unnecessary data.
-
-## Practical Risk Notes
-
-- Scraping may be subject to upstream terms, rate limits, and regional policy constraints.
-- Avoid broad or indiscriminate collection.
-- Log the keyword, location, and provider mode for every run.
-- Limit concurrency and use backoff to reduce blocking risk.
-- Maintain a clear source-of-truth field for `place_id` and `cid` so duplicate suppression remains deterministic.
-
-## Acceptance Criteria
-
-- The UI can still start a lead scrape from the same screen.
-- A successful run returns normalized leads that can be exported and analyzed.
-- Duplicate rates drop because the pipeline can dedupe before insert.
-- Partial failures are visible in run status and logs rather than silently lost.
-- If gosom fails, the run is marked clearly and the operator can see why.
+- downstream lead readers still consume the same `leads` table
+- new schema fields are additive
+- provider choice is isolated behind one adapter

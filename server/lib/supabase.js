@@ -3,14 +3,19 @@
 import { createClient } from "@supabase/supabase-js";
 import { config } from "../config/env.js";
 
+const isTestEnv = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
+const supabaseUrl = config.supabaseUrl || (isTestEnv ? "https://placeholder.supabase.co" : config.supabaseUrl);
+const supabaseServiceKey = config.supabaseServiceKey || (isTestEnv ? "placeholder-service-key" : config.supabaseServiceKey);
+const supabaseAnonKey = config.supabaseAnonKey || (isTestEnv ? "placeholder-anon-key" : config.supabaseAnonKey);
+
 /**
  * Admin client - bypasses RLS
  * USE ONLY for background workers, internal operations
  * NEVER expose to user-facing request handlers
  */
 export const supabaseAdmin = createClient(
-    config.supabaseUrl,
-    config.supabaseServiceKey,
+    supabaseUrl,
+    supabaseServiceKey,
     {
         auth: { persistSession: false }
     }
@@ -25,8 +30,8 @@ export const supabaseAdmin = createClient(
  */
 export function supabaseAsUser(accessToken) {
     return createClient(
-        config.supabaseUrl,
-        config.supabaseAnonKey,
+        supabaseUrl,
+        supabaseAnonKey,
         {
             global: {
                 headers: { Authorization: `Bearer ${accessToken}` }

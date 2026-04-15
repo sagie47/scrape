@@ -1,0 +1,71 @@
+[
+  {
+    "title": "Alpha Plumbing",
+    "address": "123 Main St, Austin, TX",
+    "phone": "+1 512-555-0100",
+    "web_site": "alphaplumbing.com",
+    "review_rating": 4.8,
+    "review_count": 128,
+    "latitude": 30.2672,
+    "longtitude": -97.7431,
+    "cid": "cid-alpha",
+    "place_id": "place-alpha",
+    "emails": [
+      "hello@alphaplumbing.com"
+    ],
+    "category": "Plumber",
+    "categories": [
+      "Plumber",
+      "Drainage service"
+    ],
+    "link": "https://maps.google.com/?cid=cid-alpha"
+  },
+  {
+    "title": "Alpha Plumbing",
+    "address": "123 Main St, Austin, TX",
+    "phone": "+1 512-555-0100",
+    "web_site": "https://alphaplumbing.com/contact",
+    "review_rating": 4.8,
+    "review_count": 128,
+    "latitude": 30.2672,
+    "longtitude": -97.7431,
+    "cid": "cid-alpha",
+    "place_id": "place-alpha",
+    "emails": [],
+    "category": "Plumber",
+    "link": "https://maps.google.com/?cid=cid-alpha"
+  },
+  {
+    "title": "Bravo Rooter",
+    "complete_address": {
+      "street": "456 Oak Ave",
+      "city": "Austin",
+      "state": "TX",
+      "postal_code": "78701",
+      "country": "USA"
+    },
+    "phone": "+1 512-555-0111",
+    "web_site": "https://bravorooter.com",
+    "review_rating": 4.1,
+    "review_count": 44,
+    "latitude": 30.3,
+    "longtitude": -97.7,
+    "cid": "cid-bravo",
+    "emails": [
+      "team@bravorooter.com",
+      "billing@bravorooter.com"
+    ],
+    "category": "Plumber",
+    "link": "https://maps.google.com/?cid=cid-bravo"
+  },
+  {
+    "title": "",
+    "address": "",
+    "phone": "",
+    "web_site": "",
+    "review_rating": 0,
+    "review_count": 0,
+    "cid": "",
+    "place_id": ""
+  }
+]

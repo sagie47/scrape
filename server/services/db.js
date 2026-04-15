@@ -33,6 +33,24 @@ export async function updateJob(jobId, updates) {
     if (error) throw error;
 }
 
+export async function mergeJobMetadata(jobId, patch = {}) {
+    const { data, error } = await supabaseAdmin
+        .from("jobs")
+        .select("metadata")
+        .eq("id", jobId)
+        .single();
+
+    if (error) throw error;
+
+    const metadata = {
+        ...(data?.metadata || {}),
+        ...patch
+    };
+
+    await updateJob(jobId, { metadata });
+    return metadata;
+}
+
 /**
  * Mark job as complete
  */
@@ -52,6 +70,70 @@ export async function failJob(jobId, errorMessage) {
         status: "error",
         errors: [errorMessage],
     });
+}
+
+function mergeTags(existingTags = [], incomingTags = []) {
+    return Array.from(new Set([...(existingTags || []), ...(incomingTags || [])].filter(Boolean)));
+}
+
+function toLeadResponse(data) {
+    return {
+        id: data.id,
+        jobId: data.job_id,
+        name: data.name,
+        address: data.address,
+        phone: data.phone,
+        email: data.email,
+        website: data.website,
+        rating: data.rating,
+        reviews: data.reviews,
+        placeId: data.place_id,
+        dedupeKey: data.dedupe_key,
+        cid: data.source_metadata?.cid || null,
+        completeAddress: data.source_metadata?.completeAddress || null,
+        mapsUrl: data.source_metadata?.mapsUrl || null,
+        tags: data.tags || [],
+        createdAt: data.created_at,
+        updatedAt: data.updated_at,
+        source: data.source,
+        sourceMetadata: data.source_metadata || {},
+        lastScrapedAt: data.last_scraped_at || null
+    };
+}
+
+function buildLeadPayload(userId, lead, metadata, existingLead = null) {
+    const keywordTags = metadata.keyword ? [metadata.keyword] : [];
+    const dedupeKey = lead.dedupeKey || lead.dedupe_key || existingLead?.dedupe_key || null;
+
+    return {
+        user_id: userId,
+        job_id: metadata.jobId || existingLead?.job_id || null,
+        name: lead.name || existingLead?.name || 'Unknown',
+        address: lead.address || existingLead?.address || null,
+        phone: lead.phone || existingLead?.phone || null,
+        email: lead.email || existingLead?.email || null,
+        website: lead.website || existingLead?.website || null,
+        rating: lead.rating ?? existingLead?.rating ?? null,
+        reviews: lead.reviews ?? existingLead?.reviews ?? null,
+        place_id: lead.placeId || existingLead?.place_id || null,
+        dedupe_key: dedupeKey,
+        coordinates: lead.coordinates || existingLead?.coordinates || null,
+        source: metadata.source || lead.source || existingLead?.source || 'serper',
+        source_metadata: {
+            ...(existingLead?.source_metadata || {}),
+            ...(lead.sourceMetadata || {}),
+            query: metadata.query || lead.sourceMetadata?.query || existingLead?.source_metadata?.query || null,
+            provider: metadata.provider || existingLead?.source_metadata?.provider || null,
+            providerJobId: metadata.providerJobId || existingLead?.source_metadata?.providerJobId || null,
+            scraperVersion: metadata.scraperVersion || existingLead?.source_metadata?.scraperVersion || null,
+            cid: lead.cid || existingLead?.source_metadata?.cid || null,
+            completeAddress: lead.completeAddress || existingLead?.source_metadata?.completeAddress || null,
+            mapsUrl: lead.mapsUrl || existingLead?.source_metadata?.mapsUrl || null,
+            dedupeKey
+        },
+        tags: mergeTags(existingLead?.tags || [], keywordTags),
+        last_scraped_at: new Date().toISOString()
+    };
 }
 
 /**
@@ -239,41 +321,61 @@ export async function saveLeads(userId, leads, metadata = {}) {
     const jobId = metadata.jobId || null;
 
     for (const lead of leads) {
-        // Simple insert (no upsert - avoids need for unique constraint)
-        const { data, error } = await supabaseAdmin
-            .from("leads")
-            .insert({
-                user_id: userId,
-                job_id: jobId,
-                name: lead.name,
-                address: lead.address,
-                phone: lead.phone,
-                website: lead.website,
-                rating: lead.rating,
-                reviews: lead.reviews,
-                place_id: lead.placeId,
-                coordinates: lead.coordinates,
-                source: 'serper',
-                tags: metadata.keyword ? [metadata.keyword] : [],
-            })
-            .select()
-            .single();
+        let existingLead = null;
+
+        if (lead.dedupeKey) {
+            const { data: match } = await supabaseAdmin
+                .from("leads")
+                .select("*")
+                .eq("user_id", userId)
+                .eq("dedupe_key", lead.dedupeKey)
+                .maybeSingle();
+
+            existingLead = match || null;
+        }
+
+        if (!existingLead && lead.placeId) {
+            const { data: match } = await supabaseAdmin
+                .from("leads")
+                .select("*")
+                .eq("user_id", userId)
+                .eq("place_id", lead.placeId)
+                .maybeSingle();
+
+            existingLead = match || null;
+        }
+
+        const payload = buildLeadPayload(userId, lead, { ...metadata, jobId }, existingLead);
+        let data = null;
+        let error = null;
+
+        if (existingLead) {
+            const updateResult = await supabaseAdmin
+                .from("leads")
+                .update(payload)
+                .eq("id", existingLead.id)
+                .select()
+                .single();
+
+            data = updateResult.data;
+            error = updateResult.error;
+        } else {
+            const insertResult = await supabaseAdmin
+                .from("leads")
+                .insert(payload)
+                .select()
+                .single();
+
+            data = insertResult.data;
+            error = insertResult.error;
+        }
 
         if (error) {
             console.error("saveLeads insert error:", error.message, { lead: lead.name });
             continue;
         }
         if (data) {
-            savedLeads.push({
-                id: data.id,
-                jobId: data.job_id,
-                name: data.name,
-                address: data.address,
-                phone: data.phone,
-                website: data.website,
-                rating: data.rating,
-                reviews: data.reviews
-            });
+            savedLeads.push(toLeadResponse(data));
         }
     }
 
@@ -294,16 +396,6 @@ export async function getUserLeads(userId, limit = 100) {
     if (error) throw error;
 
     return data.map(lead => ({
-        id: lead.id,
-        jobId: lead.job_id,
-        name: lead.name,
-        address: lead.address,
-        phone: lead.phone,
-        website: lead.website,
-        rating: lead.rating,
-        reviews: lead.reviews,
-        placeId: lead.place_id,
-        tags: lead.tags || [],
-        createdAt: lead.created_at
+        ...toLeadResponse(lead)
     }));
 }
